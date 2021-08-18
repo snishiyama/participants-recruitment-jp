@@ -1,31 +1,183 @@
-var TYPE = 1; // 1: 自由回答, 2: 選択式 どちらかの半角数字を入れてください。
-
-var SS = SpreadsheetApp.getActiveSpreadsheet(); // spreadsheet
-var SHEETS = SS.getSheets();
-// シート名とsettig時のkeyの対応させるための連想配列
-// getSettingとonEditedで使用される
-var NAME_TO_KEY = {"設定":"config", "テンプレート":"templates", "メンバー":"memberInfo"};
-if (SHEETS.length > 1) {
-  var SETTING = getSetting();
-  var CONFIG = SETTING.config;
-  var TEMPLATES = SETTING.templates;
-  var MEMBER_INFO = SETTING.memberInfo;
-}
+const TYPE = 3; // 1: 自由回答, 2: 選択式 どちらかの半角数字を入れてください。
 
 function init() {
-  setting();
+  settings.init();
 }
 
+///////////////////////////////////////////////////////////////////////////////
+// トリガー用の関数
+///////////////////////////////////////////////////////////////////////////////
+
+function onOpening() {
+  if (sheets.length > 1) {
+    mail.alertFewMails();
+  }
+}
+
+function onFormSubmission(e) {
+  try {
+    // systemを利用しないなら以降の処理を行わない
+    if (settings.config.useFormSystem != 1) {
+      return;
+    }
+    // 実際の回答に続けて値のない回答が送られることがあるので以下のif文で回避
+    if (e.values[settings.config.colAddress].length > 0 && !settings.isDefault()) {
+      booking.values = e.values;
+      booking.setEventType(ScriptApp.EventType.ON_FORM_SUBMIT).validate().allocate(e.range.getRow());
+      const { name, address, from: fromWhen, to: toWhen, trigger } = booking;
+      // mail
+      mail.create(name, trigger, fromWhen, toWhen).setBcc('', settings.config.selfBccTentative).send(address).alertFewMails();
+      onCalendarUpdated();
+      Logger.log('SUCCESS!');
+    } else {
+      Logger.log(e.values);
+    }
+  } catch (err) {
+    const msg = `[${err.name}] ${err.message}`;
+    Logger.log(msg);
+    MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
+  }
+}
+
+function onSheetEdit(e) {
+  try {
+    const sh = e.range.getSheet();
+    const sheetName = sh.getSheetName();
+    // 「フォームの回答」シートが編集された場合
+    if (sheetName === sheets.sheets[0].getSheetName()) {
+      const srow = e.range.getRow();
+      const erow = e.range.getLastRow();
+      const scol = e.range.getColumn();
+      // 予約ステータスの列を編集した場合
+      if (scol === settings.config.colStatus + 1) {
+        const answers = sh.getDataRange().getValues();
+        for (let row = srow; row <= erow; row++) {
+          // トリガーが削除された場合以降の処理をしない
+          if (answers[row - 1][settings.config.colStatus] == '') {
+            continue;
+          }
+          booking.values = answers[row - 1];
+          // まだ予約に関するメールが送信されていない場合
+          if (booking.values[settings.config.colMailed] !== 1) {
+            booking.setEventType(ScriptApp.EventType.ON_EDIT).validate().allocate(row);
+            const { name, address, from: fromWhen, to: toWhen, trigger, assistant } = booking;
+            mail.create(name, trigger, fromWhen, toWhen).setBcc(assistant, settings.config.selfBccTentative).send(address).alertFewMails();
+          }
+        }
+      }
+    } else {
+      // 「フォームの回答」以外のシートが編集された場合
+      if (sheetName == '設定') {
+        oldConfig = copy(settings.config); // すぐあとの比較のために古い設定をコピー
+        settings.collect(sheetName, true).save(); // 更新・保存
+        if (settings.config.remindHour != oldConfig.remindHour) {
+          scriptTriggers.updateClockTrigger(settings.config.remindHour, settings.config.expTimeZone);
+        } else if (settings.config.expTimeZone != oldConfig.expTimeZone) {
+          sheets.ss.setSpreadsheetTimeZone(settings.config.expTimeZone);
+          scriptTriggers.updateClockTrigger(settings.config.remindHour, settings.config.expTimeZone);
+        } else if (settings.config.workingCalendar != oldConfig.workingCalendar) {
+          schedule.calendar = CalendarApp.getCalendarById(settings.config.workingCalendar);
+          scriptTriggers.updateCalendarTrigger(settings.config.workingCalendar);
+          alertInitWithChangeOf('参照するカレンダー');
+        } else if (settings.config.experimentLength != oldConfig.experimentLength) {
+          alertInitWithChangeOf('実験の所要時間');
+        } else if (settings.config.openTime != oldConfig.openTime) {
+          alertInitWithChangeOf('実験の開始時刻');
+        } else if (settings.config.closeTime != oldConfig.closeTime) {
+          alertInitWithChangeOf('実験の終了時刻');
+        }
+      } else if (sheetName == 'メンバー' || sheetName == 'テンプレート') {
+        settings.collect(sheetName, true).save(); // 新しいキャッシュを作成
+      } else if (sheetName == '空き予定') {
+        onCalendarUpdated();
+      }
+    }
+  } catch (err) {
+    //実行に失敗した時に通知
+    const msg = `[${err.name}] ${err.message}`;
+    Logger.log(msg);
+    dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
+    // Browser.msgBox('エラーが発生しました', msg, Browser.Buttons.OK);
+  }
+}
+
+function onClock() {
+  try {
+    // リマインダーの送信
+    const answers = sheets.sheets[0].getDataRange().getValues();
+    const timeNow = new Date();
+    const tomorrowExps = [];
+    for (let row = 0; row < answers.length; row++) {
+      let ans = answers[row];
+      if (ans[settings.config.colReminded] == '送信準備') {
+        const remindDatetime = ans[settings.config.colRemindDate];
+        if (is(remindDatetime, 'Date') && remindDatetime <= timeNow) {
+          booking.values = ans;
+          booking.setEventType(ScriptApp.EventType.CLOCK).allocate(row + 1);
+          const { name, address, from: fromWhen, to: toWhen, assistant } = booking;
+          mail.create(name, 'リマインダー', fromWhen, toWhen).setBcc(assistant, settings.config.selfBccReminder).send(address);
+          tomorrowExps.push({ name: name, from: fromWhen, to: toWhen });
+        }
+      }
+    }
+    // 自分にもリマインダーを送る場合
+    if (tomorrowExps.length > 0 && settings.config.sendTmrwExps > 0) {
+      const tomorrow = new Date();
+      tomorrow.setDate(new Date().getDate() + 1);
+      tomorrowExps.sort((a, b) => {
+        return a.from < b.from ? -1 : 1;
+      });
+      const schedule = tomorrowExps.map((exp) => {
+        return `${fmtDate(exp.from, 'HH:mm')} - ${fmtDate(exp.to, 'HH:mm')} ${exp.name}`;
+      });
+      const body = schedule.join('\n');
+      const title = `明日（${fmtDate(tomorrow, 'MM/dd')}）の実験予定`;
+      MailApp.sendEmail(settings.config.experimenterMailAddress, title, body);
+    }
+
+    // フォームの修正
+    if (settings.config.useFormSystem == 1) {
+      form.modify();
+    }
+  } catch (err) {
+    //実行に失敗した時に通知
+    const msg = `[${err.name}] ${err.message}`;
+    Logger.log(msg);
+    MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
+  }
+}
+
+function onCalendarUpdated() {
+  try {
+    // type 3の時だけ動作させる
+    if (TYPE != 3) {
+      return;
+    }
+    schedule.update().allocate(); // スケジュールを更新してシートに反映する
+    form.modify();
+  } catch (err) {
+    //実行に失敗した時に通知
+    const msg = `[${err.name}] ${err.message}`;
+    Logger.log(msg);
+    MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Utility functions
+///////////////////////////////////////////////////////////////////////////////
+
 // 型判定のための関数https://qiita.com/Layzie/items/465e715dae14e2f601de より
-function is(type, obj) {
+function is(obj, type) {
   const clas = Object.prototype.toString.call(obj).slice(8, -1);
   return obj !== undefined && obj !== null && clas === type;
 }
 
 // 全角を半角に変換する関数
 function zenToHan(str) {
-  if (is('String', str)) {
-    return str.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function(s) { // 全角を半角に変換
+  if (is(str, 'String')) {
+    return str.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (s) {
+      // 全角を半角に変換
       return String.fromCharCode(s.charCodeAt(0) - 65248); // 10進数の場合
     });
   } else {
@@ -33,885 +185,1279 @@ function zenToHan(str) {
   }
 }
 
+function numToColumnNotation(num) {
+  const alphabet_upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let dgt = Math.floor(num / alphabet_upper.length);
+  let remain = num % alphabet_upper.length;
+  if (dgt < 1) {
+    return alphabet_upper[remain];
+  }
+  return numToColumnNotation(dgt - 1) + alphabet_upper[remain];
+}
+
+function columnNotationToNum(notation) {
+  const alphabet_upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  if (notation.length < 1) {
+    return -1;
+  } else if (notation.length == 1) {
+    return alphabet_upper.indexOf(notation);
+  }
+  return (columnNotationToNum(notation.slice(0, -1)) + 1) * alphabet_upper.length + alphabet_upper.indexOf(notation.slice(-1));
+}
+
 function fmtDate(datetime, pattern) {
-  if (is('Date', datetime)) {
+  if (is(datetime, 'Date')) {
     if (/yobi/.test(pattern)) {
-      var yobi = new Array("日", "月", "火", "水", "木", "金", "土")[datetime.getDay()]
-      pattern = pattern.replace(/yobi/, yobi)
+      var yobi = new Array('日', '月', '火', '水', '木', '金', '土')[datetime.getDay()];
+      pattern = pattern.replace(/yobi/, yobi);
     }
-    return Utilities.formatDate(datetime, CONFIG.expTimeZone, pattern);
+    return Utilities.formatDate(datetime, settings.config.expTimeZone, pattern);
   }
   return datetime;
 }
 
-// 2次元配列のある列にある値が入っている行番号をとってくる関数
-function getRowIDContainTarget(arr2D, col, target) {
-  var targetRow = undefined;
-  for (var i = 0; i < arr2D.length; i++) {
-    var arr = arr2D[i];
-    if (arr[col] == target) {
-      targetRow = i + 1; // getRangeで使うことを想定しているので，+1する
-      break;
-    }
-  }
-  return targetRow;
-}
-
-function getInfo(sheetName) {
-  const sheetInfo = SS.getSheetByName(sheetName);
-  const infoArray = sheetInfo.getDataRange().getValues();
-  const infoObj = {};
-  for (var i = 1; i < infoArray.length; i++) {
-    // 参照するシートによって処理を変える
-    if (sheetName == "設定") {
-      var key = infoArray[i][1];
-      var property = zenToHan(infoArray[i][2]); // 念の為
-      if (key.indexOf("col") == 0) { // 列番号に関する設定は，Numberに変更しておく
-        property = Number(property);
-      }
-    } else if (sheetName == "テンプレート") {
-      var key = infoArray[i][0];
-      var property = {};
-      property.changeByDay = infoArray[i][1];
-      property.title = infoArray[i][2];
-      property.bodywd = infoArray[i][3];
-      property.bodywe = infoArray[i][4];
-    } else if (sheetName == "メンバー") {
-      var key = zenToHan(infoArray[i][0]);
-      var property = zenToHan(infoArray[i][2]);
-    }
-    infoObj[key] = property;
-  }   
-  return infoObj;
-}
-
-function getSetting() {
-  const sheetCache = SS.getSheetByName("Cache");
-  const cacheJson = sheetCache.getRange(1,1).getValue();
-  if (cacheJson.length < 10) {
-    var settingObj = {};
-    for (name in NAME_TO_KEY) {
-      var key = NAME_TO_KEY[name];
-      settingObj[key] = getInfo(name);
-    }
-  } else {
-    var settingObj = JSON.parse(cacheJson);
-    // parseしたままだと以下の2つがstringのままで機能しない
-    settingObj.config.openDate = new Date(settingObj.config.openDate);
-    settingObj.config.closeDate = new Date(settingObj.config.closeDate);
-  }
-  // 実験開始日・終了日の調整
-  settingObj.config.outOfDate = false;
-  if (settingObj.config.openDate < new Date()) {
-    settingObj.config.openDate = new Date();
-  }
-  if (settingObj.config.closeDate < new Date()) {
-    settingObj.config.outOfDate = true;
-    const configTemp = getInfo("設定");
-    if (configTemp.nowExperimenting == 1) {
-      const title = "実験実施期間を修正してください";
-      const SSName = SS.getName();
-      const text = "以下のファイルの実験実施期間が過去になっています。早急に修正してください。\nファイル名: " + SSName +
-                  "\n\nこの通知を切る場合は「設定」シートのnowExperimentingの行を0にしてください";
-      console.log(text);
-      MailApp.sendEmail(settingObj.config.experimenterMailAddress, title, text);
-    }
-  }
-  // 実験開始日・終了日の日時の設定
-  settingObj.config.openDate.setHours(settingObj.config.openTime, 0, 0);
-  settingObj.config.closeDate.setHours(settingObj.config.closeTime, 0, 0);
-  return settingObj;
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
-// メインの関数群で利用されるミニ関数
-///////////////////////////////////////////////////////////////////////////////
-
-// 希望日時を取得しdate型に変換する関数
-function getExpDateTime(array) {
-  const expLength = CONFIG.experimentLength;
-  if (TYPE == 1) {
-    var from = new Date(array[CONFIG.colExpDate - 1]);
-    var to = new Date(from);
-    to.setMinutes(from.getMinutes() + expLength);
-  } else { // TYPE == 2 なら
-    // 希望日の処理
-    var date = array[CONFIG.colExpDate - 1];
-    if (is("String", date)) {
-      date = zenToHan(date);
-      var from = new Date();
-      var dateInfo = date.match(/\d+/g);
-      if (dateInfo.length == 3) { //年月日なら
-        from.setFullYear(dateInfo[0], dateInfo[1] - 1, dateInfo[2]);
-      } else if (dateInfo.length == 2) { //月日なら
-        from.setMonth(dateInfo[0] - 1, dateInfo[1]);
-      } else if (dateInfo.length == 1) { //日なら
-        from.setDate(dateInfo[0]);
-      }
-    } else if (is("Date", date)) {
-      var from = new Date(date);
-    } else {
-      throw new Error("希望日はString型かDate型にしてください");
-    }
-    from.setSeconds(0,0);
-
-    // 希望時間の処理
-    var to = new Date(from);
-    var time = array[CONFIG.colExpTime - 1];
-    if (is("String", time)) {
-      time = zenToHan(time);
-      var FromTo = time.match(/\d+/g); //空白を除去し，~で分けて要素２の配列に
-      from.setHours(FromTo[0],FromTo[1]);
-      if (FromTo.length == 4) { // timeが hh:mm-hh:mm 形式なら
-        to.setHours(FromTo[2],FromTo[3]); 
-      } else if (FromTo.length == 2) { // timeが hh:mm 形式なら
-        to.setMinutes(from.getMinutes() + expLength);
-      } else {
-        throw new Error("希望時間の形式は'hh:mm-hh:mm'(開始時刻と終了時刻の両方を含める)か'hh:mm'(開始時刻のみ)にしてください");
-      }
-    } else if (is("Date", time)) {
-      from.setHours(time.getHours(), time.getMinutes());
-      to = new Date(from);
-      to.setMinutes(from.getMinutes() + expLength);
-    } else {
-      throw new Error("希望時間はString型かDate型にしてください");
-    }
-  }
-  return {'from': from, 'to': to};
+function copy(obj) {
+  return JSON.parse(JSON.stringify(obj));
 }
 
 // https://qiita.com/jz4o/items/d4e978f9085129155ca6 を改変
-function isHoliday(time){
+function isHoliday(time) {
   //土日か判定
-  var weekInt = time.getDay();
-  if(weekInt <= 0 || 6 <= weekInt){
+  let weekInt = time.getDay();
+  if (weekInt <= 0 || 6 <= weekInt) {
     return true;
   }
 
   //祝日か判定
-  var calendarId = "ja.japanese#holiday@group.v.calendar.google.com";
-  var calendar = CalendarApp.getCalendarById(calendarId);
-  var todayEvents = calendar.getEventsForDay(time);
-  if(todayEvents.length > 0){
-    return true;
+  const calendar = CalendarApp.getCalendarById('ja.japanese#holiday@group.v.calendar.google.com');
+  if (calendar == null) {
+    let msg = '祝日のカレンダーがご自身のgoogleカレンダーに登録されていません。実験日の休日判定を行う場合は祝日カレンダーを登録してください。';
+    msg += 'もし休日判定を行わない場合は「テンプレート」シートのB列の数字をすべて0に変更してください。';
+    msg += '\n\nなおこのエラーが発生したため参加者にはメールは送られていません。休日判定のための設定したのち';
+    msg += '予約ステータスを含む右4列の内容を削除し再度予約ステータスにトリガーを入力してください。';
+    throw new Error(msg);
   }
+  const todayEvents = calendar.getEventsForDay(time);
 
-  return false;
+  return todayEvents.length > 0;
 }
 
-function getMailContents(trigger, time) {
-  const template = TEMPLATES[trigger];
-  var body = template.bodywd;
-  if (template.changeByDay == 1 && isHoliday(time)) { //もし週末なら
-    body = template.bodywe;
+function alertInitWithChangeOf(changed) {
+  if (TYPE != 3) {
+    return;
   }
-  for (key in CONFIG) { // メールの本文の変数を置換する
-    var regex = new RegExp(key,'g');
-    body = body.replace(regex, CONFIG[key]);
+  const choice = dlg.alert(`${changed}が変更されました`, '空き予定を初期化しますか？', dlg.ui.ButtonSet.OK_CANCEL);
+  if (choice == dlg.ui.Button.OK) {
+    schedule.init();
+    form.modify();
   }
-  return {title: template.title, body: body};
 }
 
-// memberシートからbccアドレスを追加する関数
-function getBccAddresses(charges, selfBcc) {
-  charges = zenToHan(charges);
-  const bccArray = [];
-  if (selfBcc > 0) bccArray.push(CONFIG.experimenterMailAddress);
-  const strCharges = String(charges);
-  if (strCharges.length > 0) { // 担当が空欄でなければ
-    const chargeIDs = strCharges.match(/\d+/g);
-    if (is("Array", chargeIDs)) {
-      for (var i = 0; i < chargeIDs.length; i++) {
-        var chargeID = chargeIDs[i];
-        bccArray.push(MEMBER_INFO[chargeID]);
+///////////////////////////////////////////////////////////////////////////////
+// Objects
+///////////////////////////////////////////////////////////////////////////////
+
+// シートをいい感じに扱いやすくしてくれるはずのオブジェクト
+const sheets = (function () {
+  const __ss = SpreadsheetApp.getActiveSpreadsheet(); // spreadsheet
+  let __sheets = __ss.getSheets();
+  let __name_idx = new Map();
+  __sheets.forEach((sh, idx) => __name_idx.set(sh.getName(), idx));
+
+  let __values = { 設定: undefined, テンプレート: undefined, メンバー: undefined, 空き予定: undefined, Cached: undefined };
+
+  return {
+    get length() {
+      return __sheets.length;
+    },
+    get sheets() {
+      return __sheets;
+    },
+    get ss() {
+      return __ss;
+    },
+
+    update: function () {
+      __sheets = __ss.getSheets();
+      __name_idx = new Map();
+      __sheets.forEach((sh, idx) => __name_idx.set(sh.getName(), idx));
+      return this;
+    },
+
+    getSheetByName: function (name) {
+      if (__name_idx.get(name) === undefined) {
+        new Error(`「${name}」シートがありません。`);
       }
-    }
-  }
-  if (bccArray.length > 0) return bccArray.join(',');
-  return "";
-}
+      return __sheets[__name_idx.get(name)];
+    },
 
-// mailの内容を作成する関数
-function sendEmail(name, address, from, to, trigger, chargeID, selfBcc) {
-  //メールに記載する、予約日時の変数を作成する
-  CONFIG.participantName = name;
-  CONFIG.expDate = fmtDate(from, 'MM/dd（yobi）');
-  CONFIG.fromWhen = fmtDate(from, 'HH:mm');
-  CONFIG.toWhen = fmtDate(to, 'HH:mm');
-  CONFIG.openDate = fmtDate(CONFIG.openDate, 'yyyy/MM/dd');
-  CONFIG.closeDate = fmtDate(CONFIG.closeDate, 'yyyy/MM/dd');
-  const mail = getMailContents(trigger, from);
-  const bccAddresses = getBccAddresses(chargeID, selfBcc);
-  if (bccAddresses.length > 5) MailApp.sendEmail(address, mail.title, mail.body, {bcc: bccAddresses});
-  else MailApp.sendEmail(address, mail.title, mail.body);
-  setRemainingMails();
-}
+    getValuesOf: function (name, update = false) {
+      if (__values[name] === undefined || update) {
+        const sh = this.getSheetByName(name);
+        __values[name] = sh.getDataRange().getValues();
+      }
+      return __values[name];
+    },
 
-function setRemainingMails() {
-  const remainingMails = MailApp.getRemainingDailyQuota();
-  const sheetConfig = SS.getSheetByName('設定');
-  const configs = sheetConfig.getDataRange().getValues(); //シート全体のデータを取得。2次元の配列 [行 [列]]
-  const targetRow = getRowIDContainTarget(configs, 1, 'remainingMails');
-  sheetConfig.getRange(targetRow, 3).setValue(remainingMails);
-}
+    getValueAt: function (sheetName, row, col) {
+      const values = this.getValuesOf(sheetName);
+      return values[row][col];
+    },
 
-function alertRemainingMails() {
-  const remainingMails = MailApp.getRemainingDailyQuota();
-  const thresholds = [5, 10, 20];
-  const identical = function(value) {return value == remainingMails};
-  if (thresholds.some(identical)) {
-    const title = "自動送信メールの残数が"+ String(remainingMails) + "です。";
-    const message = title + "この24時間以内に送信されるかもしれない予約の確認やリマインダーのメール数を考慮して予約を完了させてください。" +
-                    "自分や分担者にもメールが送信されるようにしている場合は1通あたりに減る数が 2, 3... 大きくなります。";
-    Browser.msgBox(title, message, Browser.Buttons.OK);
-  }
-}
-
-function isFinalizeTrigger(trigger) {
-  const finalizeTriggers = String(CONFIG.finalizeTrigger).match(/\d+/g);
-  const identical = function(value) {return value === trigger};
-  return finalizeTriggers.some(identical);
-}
-
-function updateCalendar(oldEventName, newEventName, from, to, trigger) {
-  const cal = CalendarApp.getCalendarById(CONFIG.workingCalendar); //予約を記載するカレンダーを取得
-  // まず予約イベントを削除する
-  const reserve = cal.getEvents(from, to);
-  for (var i = 0; i < reserve.length; i++) {
-    if (reserve[i].getTitle() == oldEventName) {
-      reserve[i].deleteEvent();
-    }
-  }
-  if (isFinalizeTrigger(trigger)) {
-    cal.createEvent(newEventName, from, to); //予約確定情報をカレンダーに追加
-  }
-}
-
-function setReminder(from, trigger) {
-  if (isFinalizeTrigger(trigger)) {
-    // リマインダーのための設定をする
-    const remindDate = new Date(from)
-    remindDate.setDate(from.getDate() - 1); //remindDateの時刻を予約時間の1日前に設定する。
-    const time = new Date(); //現在時刻の取得
-    time.setHours(19); //19時に設定
-    // 予約を完了させた日の19時にremindDateの時刻が達していない場合、"送信準備"というコードを指定のセルに入力する
-    if (remindDate > time) {
-      return [1, remindDate, "送信準備"];
-    }
-    return [1, remindDate, "直前のため省略"];
-  }
-  return [1,'N/A','N/A']; // triggerが指定のトリガー以外のとき
-}
-
-// 実験期間に合わせてフォームの日にちの選択肢を変える
-function modifyFormType2() {
-  const linkedFormURL = SS.getFormUrl();
-  const linkedForm = FormApp.openByUrl(linkedFormURL);
-  // 実行日がcloseDateを過ぎていたら以下を実行しない
-  if (CONFIG.outOfDate) {
-    // 実験中でなければ受付を終了させようと思ったが，
-    // どうせなら同じことをtype1でもできるようにしようと思った
-    // if (CONFIG.nowExperimenting <= 0) {
-    //   linkedForm.setAcceptingResponses(false);
-    // }
-    return;
-  }
-  const items = linkedForm.getItems();
-  const secondLastItem = items[CONFIG.colExpDate - 2];
-  const itemType = secondLastItem.getType();
-  const choices = [];
-  if (itemType == "LIST") {
-    var item = secondLastItem.asListItem();
-  } else if (itemType == "MULTIPLE_CHOICE") {
-    var item = secondLastItem.asMultipleChoiceItem();
-  } else {
-    return;
-  }
-  const openDate = new Date(CONFIG.openDate);
-  var lastDate = new Date(CONFIG.closeDate);
-  var choiceDate = new Date(openDate);
-  choiceDate.setHours(0,0,0,0);
-  lastDate.setHours(0,0,0,0);
-  if (new Date() > choiceDate) choiceDate.setDate(choiceDate.getDate() + 1);
-  while (choiceDate <= lastDate) {
-    var strChoiceDay = fmtDate(choiceDate, "yyyy/MM/dd");
-    var newChoice = item.createChoice(strChoiceDay);
-    choices.push(newChoice);
-    choiceDate.setDate(choiceDate.getDate() + 1);
-  }
-  item.setChoices(choices);
-}
-
-function isDefault() {
-  const def = {
-    Name: false,
-    Phone:false,
-    Place:false
+    getTargetRowID(sheetName, col, target) {
+      let sheetValues = this.getValuesOf(sheetName);
+      for (let row = 0; row < sheetValues.length; row++) {
+        var rowValues = sheetValues[row];
+        if (rowValues[col] == target) {
+          return row + 1; // getRangeで使うことを想定しているので，+1する
+        }
+      }
+      return undefined;
+    },
   };
-  if (CONFIG.experimenterName == '実験太郎') def.Name = true;
-  if (CONFIG.experimenterPhone == 'xxx-xxx-xxx') def.Phone = true;
-  if (CONFIG.experimentRoom == '実施場所') def.Place = true;
+})();
 
-  const title = "設定がデフォルトのままです";
-  var fb = "以下の重要な設定がデフォルトのままだったので，参加希望者への予約確認メールの送信を中止しました。\n\n";
-  if (def.Name || def.Phone || def.Place) { // デフォルトのままなら
-    if (def.Name)  fb += "実験者名\n";
-    if (def.Phone) fb += "電話番号\n";
-    if (def.Place) fb += "実施場所\n";
-    fb += "\n変更後，再度参加者応募のテストをして，予約確認のメールが送信されるかどうか，およびその本文が適切かどうかを確認してください。";
-    MailApp.sendEmail(CONFIG.experimenterMailAddress, title, fb);
-    return true;
-  }
-  return false;
-}
+// 設定をいい感じに扱いやすくしてくれるはずのオブジェクト
+const settings = (function () {
+  let __settings = {};
+  const __name_to_key = new Map([
+    ['設定', 'config'],
+    ['テンプレート', 'templates'],
+    ['メンバー', 'members'],
+  ]);
 
-///////////////////////////////////////////////////////////////////////////////
-// メインの関数群
-///////////////////////////////////////////////////////////////////////////////
-
-//仮予約があった際に、カレンダーに書き込む関数
-function checkAppointment(e) {
-  try{
-    //実験情報の取得
-    const answersArray = e.values;
-    const participantName = answersArray[CONFIG.colParName - 1];
-
-    //重複の確認
-    const expDT = getExpDateTime(answersArray);
-    // 設定がデフォルトかどうかを判定する
-    if (!isDefault()) { // 設定がデフォルトから変更されていればメールを送る
-      const cal = CalendarApp.getCalendarById(CONFIG.workingCalendar); //仮予約を記載するカレンダーを取得
-      const allEvents = cal.getEvents(expDT.from, expDT.to);
-      var trigger = '仮予約';
-      var values = ['', '', '', ''];
-      if (allEvents.length > 0) {
-        trigger = '重複';
-        values = [trigger, 1, 'N/A', 'N/A'];
-      } else if (expDT.from.getHours() < CONFIG.openTime || expDT.to.getHours() > CONFIG.closeTime || 
-                 expDT.from < CONFIG.openDate || expDT.from > CONFIG.closeDate) {
-        trigger = '時間外';
-        values = [trigger, 1, 'N/A', 'N/A'];
-      } else {
-        const eventTitle = "仮予約:" + participantName;
-        cal.createEvent(eventTitle, expDT.from, expDT.to); //仮予約情報をカレンダーに作成
+  function __getConfig(update) {
+    const table = sheets.getValuesOf('設定', update);
+    __settings.config = {};
+    for (let row = 1; row < table.length; row++) {
+      let key = table[row][1];
+      let val = zenToHan(table[row][2]); // 念の為
+      if (key.indexOf('col') == 0) {
+        val = columnNotationToNum(val); // 列番号に関する設定は，Numberに変更しておく
       }
-      const participantEmail = answersArray[CONFIG.colAddress - 1];
-      const sheetAnswers = SHEETS[0];
-      const numRow = e.range.getRow();
-      const colNumArray = [CONFIG.colStatus, CONFIG.colMailed, CONFIG.colRemindDate, CONFIG.colReminded];
-      sendEmail(participantName, participantEmail, expDT.from, expDT.to, trigger,
-                '', CONFIG.selfBccTentative);
-      // sheetの修正
-      sheetAnswers.getRange(numRow, colNumArray[0], 1, colNumArray.length).setValues([values]);
+      __settings.config[key] = val;
     }
-    console.log('Success!');
-  } catch(err) {
-    //実行に失敗した時に通知
-    const fb = "[line " + err.lineNumber + "] " +err.message;
-    console.log(fb);
-    MailApp.sendEmail(CONFIG.experimenterMailAddress, "エラーが発生しました", fb);
+    __arrangeExpPeriod();
   }
-}
 
-// スプレッドシート上で予約を完了させ、メール送信及びカレンダーへの書き込みを行う関数
-function finalizeAppointment(array) {
-  const prepTriggers = Object.keys(TEMPLATES);
-  const trigger = String(array[CONFIG.colStatus - 1]);
-  const identical = function(value) {return value == trigger};
-  if (prepTriggers.some(identical)) {
-    const participantName = array[CONFIG.colParName - 1];
-    const expDT = getExpDateTime(array);  //予約された日時（見やすい形式）
-    const oldEventName = "仮予約:" + participantName;
-    var newEventName = "予約完了:" + participantName;
-    if (CONFIG.colParNameKana > 0) {
-      newEventName = newEventName + '('+array[CONFIG.colParNameKana - 1]+')';
-    }
-    updateCalendar(oldEventName, newEventName, expDT.from, expDT.to, trigger);
-    // メールの送信
-    const ParticipantEmail = array[CONFIG.colAddress - 1];
-    sendEmail(participantName, ParticipantEmail, expDT.from, expDT.to, trigger, 
-              array[CONFIG.colCharge - 1], CONFIG.selfBccFinalize);
-    alertRemainingMails();
-    return setReminder(expDT.from, trigger);
-  } else {
-    const message = "予約ステータスに入力された文字列（トリガー）が「テンプレート」に存在しないため，メールの送信等の処理は行われませんでした。"
-    Browser.msgBox("未定義のトリガー", message, Browser.Buttons.OK);
-    return ['','',''];
-  }
-}
-
-//リマインダーを実行する関数
-function sendReminders() {
-  try {
-    const sheetAnswers = SHEETS[0];
-    const data = sheetAnswers.getDataRange().getValues(); //シート全体のデータを取得。2次元の配列 [行 [列]]
-    const time = new Date().getTime(); //現在時刻の取得
-    var tomorrowExps = [];
-    // スプレッドシートを1列ずつ参照し、該当する被験者を探していく。
-    for (var row = 1; row < data.length; row++) { // 0行目は列名
-      //ステータスが送信準備になっていることを確認する
-      var rowVals = data[row];
-      if (rowVals[CONFIG.colReminded - 1] == "送信準備") {
-        var reminder = rowVals[CONFIG.colRemindDate - 1];
-        // もし現在時刻がリマインド日時を過ぎていたならメールを送信
-        if ((reminder != "") && (reminder.getTime() <= time)) {
-          // メールの本文の内容を作成するための要素を定義
-          var participantName = rowVals[CONFIG.colParName - 1]; //被験者の名前
-          //参加者にメールを送る
-          var participantEmail = rowVals[CONFIG.colAddress - 1];
-          var expDT = getExpDateTime(rowVals);
-          sendEmail(participantName, participantEmail, expDT.from, expDT.to, 'リマインダー',
-                    rowVals[CONFIG.colCharge - 1], CONFIG.selfBccReminder);
-          sheetAnswers.getRange(row + 1, CONFIG.colReminded).setValue("送信済み"); // シートの修正
-          console.log('Success!');
-          var expInfo = {name: participantName, from: expDT.from, to: expDT.to};
-          tomorrowExps.push(expInfo);
-        }
-      }
-    }
-    // 実験者用のメールを作成して翌日の実験時間を知らせる
-    if (tomorrowExps.length > 0 && CONFIG.sendTmrwExps > 0) {
-      var allBodies = [];
-      tomorrow = fmtDate(tomorrowExps[0].from, 'MM/dd');
-      tomorrowExps.sort(function(a, b) {
-        return a.from < b.from ? -1 : 1; // 3項演算子
-      });
-      for (var indiv = 0; indiv < tomorrowExps.length; indiv++) {
-        var indivInfo = tomorrowExps[indiv];
-        var strFrom = fmtDate(indivInfo.from, 'HH:mm');
-        var strTo = fmtDate(indivInfo.to, 'HH:mm');
-        var indivBody = strFrom + " - " + strTo + "  " + indivInfo.name;
-        allBodies.push(indivBody);
-      }
-      var joinedBody = allBodies.join("\n");
-      var reminderTitle = "明日（" + tomorrow + "）の実験予定";
-      MailApp.sendEmail(CONFIG.experimenterMailAddress, reminderTitle, joinedBody);
-    }
-  } catch (err) {
-    //実行に失敗した時に通知
-    const fb = "[line " + err.lineNumber + "] " +err.message;
-    console.log(fb);
-    MailApp.sendEmail(CONFIG.experimenterMailAddress, "エラーが発生しました", fb);
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// トリガー用の関数
-///////////////////////////////////////////////////////////////////////////////
-
-function updateTriggers(newHour, timeZone) {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    // sendRemindersのトリガーだけを削除する
-    if (triggers[i].getEventType() == ScriptApp.EventType.CLOCK) {
-      ScriptApp.deleteTrigger(triggers[i]);
-      ScriptApp.newTrigger('runTimeBased').timeBased().atHour(newHour).nearMinute(30).everyDays(1).inTimezone(timeZone).create();
+  function __getMailTemplates(update) {
+    const table = sheets.getValuesOf('テンプレート', update);
+    __settings.templates = {};
+    for (let row = 1; row < table.length; row++) {
+      let key = table[row][0];
+      let property = {};
+      property.changeByDay = table[row][1];
+      property.title = table[row][2];
+      property.bodywd = table[row][3];
+      property.bodywe = table[row][4];
+      __settings.templates[key] = property;
     }
   }
-}
 
-function onOpening() {
-  if (SHEETS.length > 1) {
-    setRemainingMails();
-    alertRemainingMails();
+  function __getMembers(update) {
+    const table = sheets.getValuesOf('メンバー', update);
+    __settings.members = {};
+    for (let row = 1; row < table.length; row++) {
+      let key = zenToHan(table[row][0]);
+      let address = zenToHan(table[row][2]);
+      __settings.members[key] = address;
+    }
   }
-}
 
-function onFormSubmitted(e) {
-  if (CONFIG.useFormSystem != 1) return; //systemを利用しないなら以降の処理を行わない
-  // 実際の回答に続けて値のない回答が送られることがあるので以下のif文で回避
-  if (e.values[CONFIG.colAddress - 1].length > 0) {
-    checkAppointment(e);
-  } else {
-    console.log(e.values);
+  function __collect(sheetName, update) {
+    switch (sheetName) {
+      case '設定':
+        __getConfig(update);
+        break;
+      case 'テンプレート':
+        __getMailTemplates(update);
+        break;
+      case 'メンバー':
+        __getMembers(update);
+        break;
+      default:
+        throw new Error(`${sheetName} は「設定」「テンプレート」「メンバー」のいずれにも一致しません`);
+    }
   }
-}
 
-function onEdited(e) {
-  try {
-    const edRange = e.range;
-    const edSheet = edRange.getSheet();
-    const edSheetName = edSheet.getSheetName();
-    if (edSheetName === SHEETS[0].getSheetName()) {
-      const edColNum = edRange.getColumn();
-      if (edColNum === CONFIG.colStatus) {
-        const edValues = edRange.getValues();
-        const edFirstRowNum = edRange.getRow();
-        const answersArray = edSheet.getDataRange().getValues();
-        for (var i = 0; i < edValues.length; i++) {
-          var edRowNum = edFirstRowNum + i;
-          var edRowVals = answersArray[edRowNum - 1];
-          if (edRowNum > answersArray.length) {
-            return; // 一番最後の行の値を削除した場合は処理しない
-          } if (edRowVals[CONFIG.colAddress - 1].length < 5) {
-            return; // データのない行の値を編集した場合は処理しない
-          } else if (edRowVals[CONFIG.colMailed - 1] !== 1) {
-            var values = finalizeAppointment(edRowVals);
-            var colNumArray = [CONFIG.colMailed, CONFIG.colRemindDate, CONFIG.colReminded];
-            edSheet.getRange(edRowNum, colNumArray[0], 1, colNumArray.length).setValues([values]);
-            console.log('Success!');
-          }
-        }
+  function __retrieve() {
+    const sh = sheets.getSheetByName('Cached');
+    const cache_json = sh.getRange(1, 1).getValue();
+    if (cache_json.length < 10) {
+      // cache用JSONが存在しない（適切ではない）場合
+      for (let sheetName of __name_to_key.keys()) {
+        __collect(sheetName);
       }
     } else {
-      const newInfo = getInfo(edSheetName);
-      // 変更を加えたシートだけcacheを変更する
-      const cache = {};
-      for (name in NAME_TO_KEY) {
-        key = NAME_TO_KEY[name];
-        if (name == edSheetName) {
-          cache[key] = newInfo;
-        } else {
-          cache[key] = SETTING[key];
+      __settings = JSON.parse(cache_json);
+      // parseしたままだと以下の2つがstringのままで機能しない
+      __settings.config.openDate = new Date(__settings.config.openDate);
+      __settings.config.closeDate = new Date(__settings.config.closeDate);
+    }
+    __arrangeExpPeriod();
+  }
+
+  function __arrangeExpPeriod() {
+    // 実験開始日・終了日の調整
+    __settings.config.outOfDate = false;
+    const now = new Date();
+    if (__settings.config.openDate < now) {
+      __settings.config.openDate = now;
+    }
+    if (__settings.config.closeDate < now) {
+      __settings.config.outOfDate = true;
+    }
+    // 実験開始日・終了日の日時の設定
+    __settings.config.openDate.setHours(__settings.config.openTime, 0, 0);
+    __settings.config.closeDate.setHours(__settings.config.closeTime, 0, 0);
+  }
+
+  if (sheets.length > 1) {
+    __retrieve();
+  }
+
+  return {
+    get config() {
+      if (__settings.config === undefined) {
+        this.collect('設定');
+      }
+      return __settings.config;
+    },
+    get templates() {
+      if (__settings.templates === undefined) {
+        this.collect('テンプレート');
+      }
+      return __settings.templates;
+    },
+    get members() {
+      if (__settings.members === undefined) {
+        this.collect('メンバー');
+      }
+      return __settings.members;
+    },
+
+    collect: function (sheetName, update = false) {
+      __collect(sheetName, update);
+      return this;
+    },
+
+    retrieve: function () {
+      __retrieve();
+      return this;
+    },
+
+    save: function () {
+      const sh = sheets.getSheetByName('Cached');
+      sh.getRange(1, 1).setValue(JSON.stringify(__settings));
+    },
+
+    isDefault: function () {
+      const is_default = {
+        実験者名: this.config.experimenterName == '実験太郎',
+        電話番号: this.config.experimenterPhone == 'xxx-xxx-xxx',
+        実施場所: this.config.experimentRoom == '実施場所',
+      };
+
+      const title = '設定がデフォルトのままです';
+      let msg = '以下の重要な設定がデフォルトのままだったので，参加希望者への予約確認メールの送信を中止しました。\n\n';
+      let is_any_default = false;
+      for (const key in is_default) {
+        if (is_default[key]) {
+          msg += `${key}\n`;
+          is_any_default = true;
         }
       }
-      const sheetCache = SS.getSheetByName('Cache');
-      sheetCache.getRange(1,1).setValue(JSON.stringify(cache));
-      if (edSheetName == '設定') {
-        if (newInfo.remindHour != CONFIG.remindHour) {
-          updateTriggers(newInfo.remindHour, newInfo.expTimeZone);
-        } else if (newInfo.expTimeZone != CONFIG.expTimeZone) {
-          SS.setSpreadsheetTimeZone(newInfo.expTimeZone);
-          updateTriggers(newInfo.remindHour, newInfo.expTimeZone);
+
+      if (is_any_default) {
+        msg += '\n変更後，再度参加者応募のテストをして，予約確認のメールが送信されるかどうか，およびその本文が適切かどうかを確認してください。';
+        MailApp.sendEmail(this.config.experimenterMailAddress, title, msg);
+      }
+
+      return is_any_default;
+    },
+  };
+})();
+
+// メールの内容やらを作成するためのオブジェクト
+const mail = (function () {
+  let __title;
+  let __body;
+  let __bcc;
+  let __remaining;
+
+  return {
+    get remaining() {
+      if (__remaining === undefined) {
+        __remaining = MailApp.getRemainingDailyQuota();
+      }
+      const sh = sheets.getSheetByName('設定');
+      const row_id = sheets.getTargetRowID('設定', 1, 'remainingMails');
+
+      sh.getRange(row_id, 3).setValue(__remaining);
+      return __remaining;
+    },
+
+    create: function (name, trigger, from, to) {
+      const template = settings.templates[trigger];
+
+      // タイトル
+      __title = template.title;
+
+      // 本文
+      __body = template.bodywd;
+      if (template.changeByDay == 1 && isHoliday(from)) {
+        __body = template.bodywe;
+      }
+      settings.config.participantName = name;
+      settings.config.expDate = fmtDate(from, 'MM/dd（yobi）');
+      settings.config.fromWhen = fmtDate(from, 'HH:mm');
+      settings.config.toWhen = fmtDate(to, 'HH:mm');
+      settings.config.openDate = fmtDate(settings.config.openDate, 'yyyy/MM/dd');
+      settings.config.closeDate = fmtDate(settings.config.closeDate, 'yyyy/MM/dd');
+      // メールの本文の変数を置換する
+      for (const key in settings.config) {
+        let regex = new RegExp(key, 'g');
+        __body = __body.replace(regex, settings.config[key]);
+      }
+
+      return this;
+    },
+
+    setBcc: function (assistants, selfBcc) {
+      const bcc_array = [];
+      if (selfBcc > 0) {
+        bcc_array.push(settings.config.experimenterMailAddress);
+      }
+      assistants = String(zenToHan(assistants));
+      // 担当が空欄でなければ
+      if (assistants.length > 0) {
+        const assistantIDs = assistants.match(/\d+/g);
+        assistantIDs.forEach((ast_id) => bcc_array.push(settings.members[ast_id]));
+      }
+      __bcc = bcc_array.join(','); // 配列が空なら''が返される
+
+      return this;
+    },
+
+    send: function (address) {
+      if (__bcc.length > 5) {
+        MailApp.sendEmail(address, __title, __body, { bcc: __bcc });
+      } else {
+        MailApp.sendEmail(address, __title, __body);
+      }
+
+      return this;
+    },
+
+    alertFewMails() {
+      const thresholds = [5, 10, 20];
+      if (thresholds.includes(this.remaining)) {
+        const title = '自動送信メールの残数が' + String(this.remaining) + 'です。';
+        const message =
+          title +
+          'この24時間以内に送信されるかもしれない予約の確認やリマインダーのメール数を考慮して予約を完了させてください。' +
+          '自分や分担者にもメールが送信されるようにしている場合は1通あたりに減る数が 2, 3... 大きくなります。';
+        dlg.alert(title, message, dlg.ui.ButtonSet.OK);
+        // Browser.msgBox(title, message, Browser.Buttons.OK);
+      }
+    },
+  };
+})();
+
+// フォームを扱うオブジェクト
+const form = (function () {
+  let __form;
+
+  function __modifyType2() {
+    if (__form === undefined) {
+      __form = FormApp.openByUrl(sheets.ss.getFormUrl());
+    }
+    const items = __form.getItems();
+    const itemForDate = items[settings.config.colExpDate - 1]; // -1 なのは，シートで フォームの送信時間が増えているから
+    let item;
+    if (itemForDate.getType() == 'LIST') {
+      item = itemForDate.asListItem();
+    } else if (itemForDate.getType() == 'MULTIPLE_CHOICE') {
+      item = itemForDate.asMultipleChoiceItem();
+    } else {
+      return;
+    }
+
+    let firstDateOfChoices = new Date(settings.config.openDate);
+    firstDateOfChoices.setHours(0, 0, 0, 0);
+    settings.config.closeDate.setHours(0, 0, 0, 0);
+    // 設定された実験の開始日が関数の動作日時よりも前の場合
+    if (firstDateOfChoices < new Date()) {
+      firstDateOfChoices.setDate(new Date().getDate() + 1);
+    }
+    const choices = [];
+    for (const choiceDate = firstDateOfChoices; choiceDate <= settings.config.closeDate; choiceDate.setDate(choiceDate.getDate() + 1)) {
+      const newChoice = item.createChoice(fmtDate(choiceDate, 'yyyy/MM/dd'));
+      choices.push(newChoice);
+    }
+    item.setChoices(choices);
+  }
+
+  function __modifyType3() {
+    if (__form === undefined) {
+      __form = FormApp.openByUrl(sheets.ss.getFormUrl());
+    }
+    const items = __form.getItems();
+    const itemForDate = items[settings.config.colExpDate - 1]; // -1 なのは，シートで フォームの送信時間が増えているから
+    let item;
+    if (itemForDate.getType() == 'LIST') {
+      item = itemForDate.asListItem();
+    } else if (itemForDate.getType() == 'MULTIPLE_CHOICE') {
+      item = itemForDate.asMultipleChoiceItem();
+    } else {
+      return;
+    }
+
+    const choices = [];
+    for (const exp_dates of schedule.available.values()) {
+      for (let idx = 0; idx < exp_dates.length; idx++) {
+        const exp_date = exp_dates[idx];
+        if (is(exp_date, 'Date') && new Date() < exp_date) {
+          const stime = fmtDate(new Date(exp_date), 'yyyy/MM/dd HH:mm');
+          let etime = new Date(stime);
+          etime.setMinutes(etime.getMinutes() + settings.config.experimentLength);
+          etime = fmtDate(etime, 'HH:mm');
+          choices.push(item.createChoice(`${stime}-${etime}`));
         }
       }
     }
-  } catch (err) {
-    //実行に失敗した時に通知
-    const fb = "[line " + err.lineNumber + "] " +err.message;
-    console.log(fb);
-    Browser.msgBox("エラーが発生しました", fb, Browser.Buttons.OK);
+    item.setChoices(choices);
   }
-}
 
-function runTimeBased() {
-  sendReminders();
-  if (TYPE == 2 && CONFIG.useFormSystem == 1) modifyFormType2();
-}
+  return {
+    modify: function () {
+      // 実験実施期間を過ぎていたらフォームを閉じる
+      if (settings.config.outOfDate) {
+        if (__form === undefined) {
+          __form = FormApp.openByUrl(sheets.ss.getFormUrl());
+        }
+        __form.setAcceptingResponses(false);
+        return;
+      }
+      switch (TYPE) {
+        case 2:
+          return __modifyType2();
+        case 3:
+          return __modifyType3();
+        default:
+          return;
+      }
+    },
+  };
+})();
+
+// 予約情報を扱うオブジェクト
+const booking = (function () {
+  let __values;
+  let __name;
+  let __address;
+  let __from;
+  let __to;
+  let __valid = false;
+  let __trigger;
+  let __status;
+  let __event_type;
+  let __calendar;
+  let __finalizeTriggers;
+  if (sheets.length > 1) {
+    __calendar = CalendarApp.getCalendarById(settings.config.workingCalendar);
+    __finalizeTriggers = String(settings.config.finalizeTrigger).match(/\d+/g);
+  }
+
+  function __isValidDatetime() {
+    if (__from === undefined || __to === undefined) {
+      return false;
+    }
+    const isValidTime = settings.config.openTime <= __from.getHours() && __to.getHours() <= settings.config.closeTime;
+    const isValidDate = settings.config.openDate <= __from && __from <= settings.config.closeDate;
+    return isValidTime && isValidDate;
+  }
+
+  function __validateSubmission() {
+    if (__from === undefined || __to === undefined) {
+      return undefined;
+    }
+    const events = __calendar.getEvents(__from, __to);
+    __trigger = '仮予約';
+    __status = ['', '', '', ''];
+    __valid = true;
+    if (events.length > 0) {
+      __trigger = '重複';
+      __status = [__trigger, 1, 'N/A', 'N/A'];
+      __valid = false;
+    } else if (!__isValidDatetime()) {
+      __trigger = '時間外';
+      __status = [__trigger, 1, 'N/A', 'N/A'];
+      __valid = false;
+    }
+  }
+
+  function __validateEdit() {
+    __trigger = String(__values[settings.config.colStatus]);
+    const validTriggers = Object.keys(settings.templates);
+
+    if (__finalizeTriggers.includes(__trigger)) {
+      // 予約確定のトリガーなら
+      // リマインダーの設定
+      const remindDate = new Date(__from);
+      remindDate.setDate(__from.getDate() - 1);
+      const today = new Date();
+      today.setHours(19);
+      __status = [1, remindDate, '送信準備'];
+      if (remindDate <= today) {
+        // リマインド日が，予約確定させた日の19時よりも前の場合
+        __status[2] = '直前のため省略';
+      }
+      __valid = true;
+    } else if (validTriggers.includes(__trigger)) {
+      // 予約確定トリガーではないが，有効なトリガーの場合
+      __status = [1, 'N/A', 'N/A'];
+      __valid = false; // トリガーはvalidだが，実験の応募はvalidではない
+    } else {
+      // 登録されたトリガーではない場合
+      throw new Error('予約ステータスに入力された文字列（トリガー）が「テンプレート」に存在しないため，メールの送信等の処理は行われませんでした。');
+    }
+  }
+
+  function __allocateOnSubmission(numRow) {
+    sheets.sheets[0].getRange(numRow, settings.config.colStatus + 1, 1, __status.length).setValues([__status]);
+    // カレンダーの編集
+    if (__valid) {
+      const eventTitle = '仮予約: ' + __name;
+      __calendar.createEvent(eventTitle, __from, __to);
+    }
+  }
+
+  function __allocateOnEdit(numRow) {
+    sheets.sheets[0].getRange(numRow, settings.config.colMailed + 1, 1, __status.length).setValues([__status]);
+    // カレンダーの編集
+    // まず予約イベントを削除する
+    const oldEventName = '仮予約:' + __name;
+    const events = __calendar.getEvents(__from, __to);
+    events.forEach((e) => {
+      if (e.getTitle() == oldEventName) e.deleteEvent();
+    });
+    if (__valid) {
+      //予約確定情報をカレンダーに追加
+      let newEventName = '予約完了:' + __name;
+      if (settings.config.colParNameKana > 0) {
+        newEventName = newEventName + '(' + array[settings.config.colParNameKana] + ')';
+      }
+      __calendar.createEvent(newEventName, __from, __to);
+    }
+  }
+
+  function __allocateOnTime(numRow) {
+    sheets.sheets[0].getRange(numRow, settings.config.colReminded + 1).setValue('送信済み'); // シートの修正
+  }
+
+  function __fmtExpDateTimeType1() {
+    const date = __values[settings.config.colExpDate];
+    __from = new Date(date);
+    __to = new Date(__from);
+    __to.setMinutes(__from.getMinutes() + settings.config.experimentLength);
+  }
+
+  function __fmtExpDateTimeType2() {
+    const date = zenToHan(__values[settings.config.colExpDate]);
+    const time = zenToHan(__values[settings.config.colExpTime]);
+    // 日付の処理
+    __from = new Date();
+    const date_info = date.match(/\d+/g); // 数字の部分だけを取り出す
+    if (date_info.length == 3) {
+      const [year, month, day] = date_info;
+      __from.setFullYear(year, month - 1, day);
+    } else if (date_info.length == 2) {
+      const [month, day] = date_info;
+      __from.setMonth(month - 1, day);
+    } else if (date_info.length == 1) {
+      const [day] = date_info;
+      __from.setDate(day);
+    }
+
+    // 時間の処理
+    const from_to = time.match(/\d+/g); // 数字の部分だけを取り出す
+    if (from_to.length == 4) {
+      // timeが hh:mm-hh:mm 形式なら
+      const [fromHour, fromMin, toHour, toMin] = from_to;
+      __from.setHours(fromHour, fromMin);
+      __to.setHours(toHour, toMin);
+    } else if (from_to.length == 2) {
+      // timeが hh:mm 形式なら
+      const [fromHour, fromMin] = from_to;
+      __from.setHours(fromHour, fromMin);
+      __to.setMinutes(__from.getMinutes() + settings.config.experimentLength);
+    }
+  }
+  /*
+    yyyy-MM-dd HH:mm -> 5
+    yyyy/MM/dd HH:mm
+    yyyy/MM/dd HH時mm分
+    yyyy年MM月dd日 HH時mm分
+    yyyy年MM月dd日HH時mm分
+
+    MM/dd HH:mm -> 4
+    MM月dd日HH時mm分 -> 4
+
+    yyyy/MM/dd HH:mm-HH:mm -> 7
+    yyyy年MM月dd日HH時mm分-HH時mm分
+    
+    HH:mm-HH:mm -> 4
+  */
+  function __fmtExpDateTimeType3() {
+    const datetime = zenToHan(__values[settings.config.colExpDate]);
+    __from = new Date();
+    const from_to = datetime.match(/\d+/g); // 数字の部分だけを取り出す
+    if (from_to.length == 7) {
+      // timeが yyyy/MM/dd HH:mm-HH:mm 形式なら
+      const [year, month, day, fromHour, fromMin, toHour, toMin] = from_to;
+      __from.setFullYear(year, month - 1, day);
+      __from.setHours(fromHour, fromMin);
+      __to = new Date(__from);
+      __to.setHours(toHour, toMin);
+    } else if (from_to.length == 6) {
+      // timeが MM/dd HH:mm-HH:mm 形式なら
+      const [month, day, fromHour, fromMin, toHour, toMin] = from_to;
+      __from.setFullYear(month - 1, day);
+      __from.setHours(fromHour, fromMin);
+      __to = new Date(__from);
+      __to.setHours(toHour, toMin);
+    } else if (from_to.length == 5) {
+      // timeが yyyy-MM-dd HH:mm 形式なら
+      const [year, month, day, fromHour, fromMin] = from_to;
+      __from.setFullYear(year, month - 1, day);
+      __from.setHours(fromHour, fromMin);
+      __to = new Date(__from);
+      __to.setMinutes(__from.getMinutes() + settings.config.experimentLength);
+    } else if (from_to.length == 4) {
+      // timeが MM-dd HH:mm 形式なら
+      const [month, day, fromHour, fromMin] = from_to;
+      __from.setFullYear(month - 1, day);
+      __from.setHours(fromHour, fromMin);
+      __to = new Date(__from);
+      __to.setMinutes(__from.getMinutes() + settings.config.experimentLength);
+    }
+  }
+
+  return {
+    get name() {
+      return __name;
+    },
+    get address() {
+      return __address;
+    },
+    get from() {
+      return __from;
+    },
+    get to() {
+      return __to;
+    },
+    set values(val) {
+      __values = val;
+      __name = __values[settings.config.colParName];
+      __address = __values[settings.config.colAddress];
+      if (TYPE == 1) {
+        __fmtExpDateTimeType1();
+      } else if (TYPE == 2) {
+        __fmtExpDateTimeType2();
+      } else if (TYPE == 3) {
+        __fmtExpDateTimeType3();
+      }
+      if (__from !== undefined) {
+        __from.setSeconds(0, 0);
+        __to.setSeconds(0, 0);
+      }
+    },
+    get values() {
+      return __values;
+    },
+    get trigger() {
+      return __trigger;
+    },
+    get status() {
+      return __status;
+    },
+    get assistant() {
+      return __values[settings.config.colAssistant];
+    },
+
+    setEventType: function (eventType) {
+      __event_type = eventType;
+      return this;
+    },
+
+    validate: function () {
+      if (__event_type == ScriptApp.EventType.ON_FORM_SUBMIT) {
+        __validateSubmission();
+      } else if (__event_type == ScriptApp.EventType.ON_EDIT) {
+        __validateEdit();
+      }
+
+      return this;
+    },
+
+    allocate: function (numRow) {
+      if (__event_type == ScriptApp.EventType.ON_FORM_SUBMIT) {
+        __allocateOnSubmission(numRow);
+      } else if (__event_type == ScriptApp.EventType.ON_EDIT) {
+        __allocateOnEdit(numRow);
+      } else if (__event_type == ScriptApp.EventType.CLOCK) {
+        __allocateOnTime(numRow);
+      }
+
+      return this;
+    },
+  };
+})();
+
+// スクリプトトリガーをいじるオブジェクト
+const scriptTriggers = (function () {
+  let __triggers;
+
+  return {
+    get triggers() {
+      if (__triggers === undefined) {
+        __triggers = ScriptApp.getProjectTriggers();
+      }
+      return __triggers;
+    },
+
+    init: function () {
+      this.triggers.forEach((tr) => ScriptApp.deleteTrigger(tr)); // 削除する
+
+      // 新しく設定する
+      ScriptApp.newTrigger('onOpening').forSpreadsheet(sheets.ss).onOpen().create();
+      ScriptApp.newTrigger('onFormSubmission').forSpreadsheet(sheets.ss).onFormSubmit().create();
+      ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(sheets.ss).onEdit().create();
+      ScriptApp.newTrigger('onClock').timeBased().atHour(19).nearMinute(30).everyDays(1).inTimezone('Asia/Tokyo').create();
+      ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(Session.getActiveUser().getEmail()).onEventUpdated().create();
+    },
+
+    updateClockTrigger: function (newHour, timeZone) {
+      this.triggers.forEach((tr) => {
+        if (tr.getEventType() == ScriptApp.EventType.CLOCK) {
+          ScriptApp.deleteTrigger(tr);
+          ScriptApp.newTrigger('onClock').timeBased().atHour(newHour).nearMinute(30).everyDays(1).inTimezone(timeZone).create();
+        }
+      });
+    },
+
+    updateCalendarTrigger: function (calendar_id) {
+      this.triggers.forEach((tr) => {
+        if (tr.getEventType() == ScriptApp.EventType.ON_EVENT_UPDATED) {
+          ScriptApp.deleteTrigger(tr);
+          ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(calendar_id).onEventUpdated().create();
+        }
+      });
+    },
+  };
+})();
+
+const dlg = (function () {
+  let __ui;
+
+  return {
+    get ui() {
+      if (__ui === undefined) {
+        __ui = SpreadsheetApp.getUi();
+      }
+      return __ui;
+    },
+
+    alert: function (title, prompt, buttons) {
+      return this.ui.alert(title, prompt, buttons);
+    },
+  };
+})();
+
+const schedule = (function () {
+  let __calendar;
+  let __available;
+
+  function __getAvailable(available_array) {
+    __available = new Map();
+    for (let row = 0; row < available_array.length; row++) {
+      let available_date = available_array[row][0];
+      let key = fmtDate(available_date, 'yyyy/MM/dd');
+      let datetimes = [];
+      for (let col = 1; col < available_array[row].length; col++) {
+        let available_time = available_array[row][col]; // HH:mm -> [HH, mm]
+        if (is(available_time, 'Date')) {
+          available_time.setFullYear(available_date.getFullYear(), available_date.getMonth(), available_date.getDate());
+          // 空き予定でない場合は空文字にする
+          if (!__isAvailable(available_time)) {
+            available_time = '';
+          }
+        }
+        datetimes.push(available_time);
+      }
+      __available.set(key, datetimes);
+    }
+  }
+
+  function __isAvailable(datetime) {
+    if (__calendar === undefined) {
+      __calendar = CalendarApp.getCalendarById(settings.config.workingCalendar);
+    }
+    const stime = new Date(datetime);
+    const etime = new Date(stime);
+    etime.setMinutes(etime.getMinutes() + settings.config.experimentLength);
+
+    // 計算された終了時刻が設定されている終了時刻を超えていないか
+    if (etime.getHours() > settings.config.closeTime) {
+      return false;
+    } else if (etime.getHours() == settings.config.closeTime && etime.getMinutes() > 0) {
+      return false;
+    }
+
+    // カレンダーの予定と重複しているかどうか
+    const events = __calendar.getEvents(stime, etime);
+    if (events.length == 0) {
+      return true;
+    }
+    return false;
+  }
+
+  return {
+    get available() {
+      if (__available === undefined) {
+        __getAvailable(sheets.getValuesOf('空き予定', true));
+      }
+      return __available;
+    },
+
+    set calendar(val) {
+      __calendar = val;
+    },
+
+    update: function () {
+      __getAvailable(sheets.getValuesOf('空き予定', true));
+      return this;
+    },
+
+    allocate: function () {
+      const table = [];
+      for (let [exp_date, exp_times] of __available.entries()) {
+        let new_row = exp_times.map((exp_time) => {
+          if (is(exp_time, 'Date')) {
+            return fmtDate(new Date(exp_time), 'HH:mm');
+          }
+          return exp_time; // should be blank string
+        });
+        new_row.splice(0, 0, exp_date);
+        table.push(new_row);
+      }
+      const sh = sheets.getSheetByName('空き予定');
+      sh.getRange(1, 1, table.length, table[0].length).setValues(table);
+    },
+
+    init: function () {
+      const available_array = [];
+      for (let now = new Date(settings.config.openDate); now <= settings.config.closeDate; now.setDate(now.getDate() + 1)) {
+        const new_row = [];
+        new_row.push(new Date(now));
+        while (now.getHours() < settings.config.closeTime) {
+          new_row.push(new Date(now));
+          now.setMinutes(now.getMinutes() + settings.config.experimentLength);
+        }
+        now.setHours(settings.config.openTime, 0, 0); // for 文の終了条件での比較のため
+        available_array.push(new_row);
+      }
+      __getAvailable(available_array);
+      sheets.getSheetByName('空き予定').clearContents();
+      this.allocate();
+    },
+  };
+})();
 
 ///////////////////////////////////////////////////////////////////////////////
 // 初期設定に関わる関数
 ///////////////////////////////////////////////////////////////////////////////
 
-function setTriggers() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    ScriptApp.deleteTrigger(triggers[i]);
-  }
-  ScriptApp.newTrigger('onOpening').forSpreadsheet(SS).onOpen().create();
-  ScriptApp.newTrigger('onFormSubmitted').forSpreadsheet(SS).onFormSubmit().create();
-  ScriptApp.newTrigger('onEdited').forSpreadsheet(SS).onEdit().create();
-  ScriptApp.newTrigger('runTimeBased').timeBased().atHour(19).nearMinute(30).everyDays(1).inTimezone("Asia/Tokyo").create();
-}
-
 // 設定用のシートおよびその見本を最初に作る関数
-function setting() {
-  var buttons = Browser.Buttons.OK_CANCEL;
-  var start = true;
-  if (SHEETS.length > 1) {
-    var msg = "一度設定を行ったことがあるようです（シートが2枚以上あります）。\\nもう一度初期化を行いますか？\\n"
-    msg += "フォームの回答が一番初めのシートでないとこれまでの情報が失われる場合があります。"
-    var choice = Browser.msgBox("設定の初期化を行います", msg, buttons);
-    if (choice !== "ok") {
+settings.init = function () {
+  try {
+    let buttons = dlg.ui.ButtonSet.OK_CANCEL;
+    let start = true;
+    let msg;
+
+    // タイプの確認
+    if (TYPE == 1) {
+      msg = '自由回答形式の設定で初期化を行います';
+    } else if (TYPE == 2) {
+      msg = '選択形式の設定で初期化を行います';
+    } else if (TYPE == 3) {
+      msg = '選択形式の設定で初期化を行います';
+    } else {
+      msg = '半角数字の1,2,3のいずれかを入力して設定の形式を選択してください';
+      buttons = dlg.ui.ButtonSet.OK;
       start = false;
     }
-  }
-  if (TYPE == 1) {
-    var msg = "自由回答形式の設定で初期化を行います";
-  } else if (TYPE == 2) {
-    var msg = "選択形式の設定で初期化を行います";
-  } else {
-    var msg = "半角数字の1か2を入力して設定の形式を選択してください";
-    buttons = Browser.Buttons.OK;
-    start = false;
-  }
-  choice = Browser.msgBox("設定の初期化", msg, buttons);
-  if (choice !== "ok") {
-    start = false;
-  }
-  if (start) {
-    SS.setSpreadsheetTimeZone('Asia/Tokyo');
-    setTriggers();
-    setDefault();
-    msg = "初期設定が終了しました。\\n";
-    msg += "「設定」シートの太枠に囲まれた項目を適切な情報に変更してください。";
-    Browser.msgBox("設定の初期化", msg, Browser.Buttons.OK);
-  } else {
-    Browser.msgBox("設定の初期化", "初期化はキャンセルされました", Browser.Buttons.OK);
-  }
-}
+    let choice = dlg.alert('設定の初期化', msg, buttons);
+    // let choice = Browser.msgBox('設定の初期化', msg, buttons);
+    if (choice != dlg.ui.Button.OK) {
+      start = false;
+    }
 
-function setDefault() {
-  try {
-    var addNewCol = true;
-    if (SHEETS.length > 2) {
-      for (i = 1; i < SHEETS.length; i++) {
-        SS.deleteSheet(SHEETS[i]);
+    if (sheets.length > 1 && start) {
+      msg = '一度設定を行ったことがあるようです（シートが2枚以上あります）。\nもう一度初期化を行いますか？\n';
+      msg += 'フォームの回答が一番初めのシートでないとこれまでの情報が失われる場合があります。';
+      choice = dlg.alert('設定の初期化を行います', msg, buttons);
+      // let choice = Browser.msgBox('設定の初期化を行います', msg, buttons);
+      if (choice != dlg.ui.Button.OK) {
+        start = false;
       }
-      addNewCol = false;
     }
-    const sheetAnswers = SHEETS[0];
-    SS.insertSheet('設定');
-    SS.insertSheet('テンプレート');
-    SS.insertSheet('メンバー');
-    SS.insertSheet('Cache');
-    const colNames = sheetAnswers.getDataRange().getValues();
-    const addColNames = [['予約ステータス', '連絡したか', 'リマインド日時', 'リマインドしたか', '担当']];
-    if (addNewCol) {
-      const newColNames = [colNames[0].concat(addColNames[0])];
-      sheetAnswers.getRange(1, 1, 1, newColNames[0].length).setValues(newColNames);
+
+    if (start) {
+      sheets.ss.setSpreadsheetTimeZone('Asia/Tokyo');
+      settings.default.create();
+      scriptTriggers.init();
+      msg = '初期設定が終了しました。\n';
+      msg += '「設定」シートの太枠に囲まれた項目を適切な情報に変更してください。';
+      dlg.alert('設定の初期化', msg, dlg.ui.ButtonSet.OK);
+      // Browser.msgBox('設定の初期化', msg, Browser.Buttons.OK);
     } else {
-      sheetAnswers.getRange(1, colNames[0].length - addColNames[0].length + 1, 1, addColNames[0].length).setValues(addColNames);
+      dlg.alert('設定の初期化', '初期化はキャンセルされました', dlg.ui.ButtonSet.OK);
+      // Browser.msgBox('設定の初期化', '初期化はキャンセルされました', Browser.Buttons.OK);
     }
-    const lastCol = sheetAnswers.getLastColumn();
-    // 設定シート
-    const start = new Date();
-    formattedStart = Utilities.formatDate(start, 'Asia/Tokyo','yyyy/MM/dd');
-    const end = new Date(start); end.setDate(start.getDate() + 13);
-    formattedEnd = Utilities.formatDate(end, 'Asia/Tokyo','yyyy/MM/dd');
-    const sheetConfig = SS.getSheetByName('設定');
-    const note2 = '「フォームの回答」の列番号と一致しているか確認してください（A列が1）';
-    var defaultConfig = [
-      ['設定項目','メール本文内でのキー','値','備考'],
-      ['実験責任者名','experimenterName','実験太郎', "実験責任者の名前を記入してください"],
-      ['実験責任者のGmailアドレス','experimenterMailAddress', Session.getActiveUser().getEmail(), "変更する必要はありません。実験用のGmailアドレスが入力されています"],
-      ['実験責任者の電話番号','experimenterPhone','xxx-xxx-xxx', "電話番号を記入してください"],
-      ['実験の実施場所','experimentRoom','実施場所',"実験の実施場所を記入してください"],
-      ['実験の所要時間','experimentLength', 60, '実験の所要時間を記入してください。2列目は変更しないでください'],
-      ['実験開始可能時刻','openTime', 9, '何時から実験できるかを記入してください（24時間表記）'],
-      ['実験終了時刻','closeTime', 19,'何時まで実験可能かを記入してください（24時間表記）'],
-      ['参照するカレンダー','workingCalendar', Session.getActiveUser().getEmail(), '利用したいカレンダーのIDをコピペしてください'],
-      ['実験開始日','openDate', formattedStart, '実験を開始する日付を記入してください（年/月/日で表記）'],
-      ['実験最終日','closeDate', formattedEnd, '実験の終了予定日を記入してください（年/月/日で表記）'],
-      ['リマインダー送信時刻','remindHour', 19, 'リマインダーを送信する時刻を記入してください（24時間表記）。実験終了時刻以後にして下さい。なお指定した時刻から1時間以内に送信されます。'],
-      ['予約を完了させるトリガー','finalizeTrigger',111,'必要に応じて任意の半角数字列に変更してください。複数指定する場合はカンマで区切ってください。'],
-      ['実験中かどうか','nowExperimenting',1,'実験中であれば1, そうでなければ0（この設定は，現在時刻が実験最終日以後になったときにアラートメールが送信されるかどうかを決定しており，1なら送信されます）'],
-      ['タイムゾーン設定','expTimeZone','Asia/Tokyo','必要に応じて変更してください。形式は http://joda-time.sourceforge.net/timezones.html を参照してください。'],
-      ['自動送信メール残数','remainingMails',MailApp.getRemainingDailyQuota(),'自動で送信できるメールの残数の目安です。「担当」機能を使っていると一気に2減ったりします。1日経つと100に近い値に戻ります。'],
-      ['予約確認メールを自分にも送るか','selfBccTentative',1,'自分にも予約確認メールを送る場合は1を，送らない場合は0を入力してください。送らない場合は自動送信できる総メール数が増えます（以下同様）。'],
-      ['予約完了メールを自分にも送るか','selfBccFinalize',0,'自分にも予約完了メールを送る場合は1を，送らない場合は0を入力してください。'],
-      ['リマインダーを自分にも送るか','selfBccReminder',0,'自分にも参加者と同様のリマインダーを送る場合は1を，送らない場合は0を入力してください。'],
-      ['翌日の実験予定を送るか','sendTmrwExps',1,'翌日の実験予定の一覧を自分にメールする場合は1を，しない場合は0を入力してください。'],
-      ['フォーム周りの関数を使用するか','useFormSystem',1,'ここを0にすると，formに関わる関数が動作しなくなります。この項目はスプレッドシートだけからメールの自動送信システムだけを使用したい人を想定しています'],
-      ['参加者名の列番号','colParName', 2, note2],
-      ['ふりがなの列番号','colParNameKana', -1, note2 + 'もし利用しない場合は-1を入力してください。']
+  } catch (err) {
+    //実行に失敗した時に通知
+    const msg = `[${err.name}] ${err.message}`;
+    Logger.log(msg);
+    dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
+    // Browser.msgBox('エラーが発生しました', msg, Browser.Buttons.OK);
+  }
+};
+
+settings.default = (function () {
+  const __sheet_answers = sheets.sheets[0];
+  const __default = {};
+
+  function __createDefault() {
+    const close_date = new Date();
+    close_date.setDate(new Date().getDate() + 13);
+    __default.config = [
+      ['設定項目', 'メール本文内でのキー', '値'],
+      ['実験責任者名', 'experimenterName', '実験太郎'],
+      ['実験責任者のGmailアドレス', 'experimenterMailAddress', Session.getActiveUser().getEmail()],
+      ['実験責任者の電話番号', 'experimenterPhone', 'xxx-xxx-xxx'],
+      ['実験の実施場所', 'experimentRoom', '実施場所'],
+      ['実験の所要時間', 'experimentLength', 60],
+      ['実験開始可能時刻', 'openTime', 9],
+      ['実験終了時刻', 'closeTime', 19],
+      ['参照するカレンダー', 'workingCalendar', Session.getActiveUser().getEmail()],
+      ['実験開始日', 'openDate', Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd')],
+      ['実験最終日', 'closeDate', Utilities.formatDate(close_date, 'Asia/Tokyo', 'yyyy/MM/dd')],
+      ['リマインダー送信時刻', 'remindHour', 19],
+      ['予約を完了させるトリガー', 'finalizeTrigger', 111],
+      ['タイムゾーン設定', 'expTimeZone', 'Asia/Tokyo'],
+      ['自動送信メール残数', 'remainingMails', MailApp.getRemainingDailyQuota()],
+      ['予約確認メールを自分にも送るか', 'selfBccTentative', 1],
+      ['予約完了メールを自分にも送るか', 'selfBccFinalize', 0],
+      ['リマインダーを自分にも送るか', 'selfBccReminder', 0],
+      ['翌日の実験予定を送るか', 'sendTmrwExps', 1],
+      ['フォーム周りの関数を使用するか', 'useFormSystem', 1],
+      ['参加者名の列', 'colParName', 'B'],
+      ['ふりがなの列', 'colParNameKana', null],
     ];
 
-    const verChoice = [
-      ['参加者アドレスの列番号','colAddress', lastCol - 7, note2],
-      ['希望日の列番号','colExpDate', lastCol - 6, note2],
-      ['希望時間の列番号','colExpTime', lastCol - 5, note2]
+    __default.config_note_template = '「フォームの回答」シートにある該当の列と一致しているか確認してください';
+    __default.config_notes = [
+      ['各項目の備考がコメントとして付されています'],
+      ['実験責任者の名前を記入してください'], // 実験責任者
+      ['変更する必要はありません。実験用のGmailアドレスが入力されています'], // 実験責任者のGmailアドレス
+      ['電話番号を記入してください'], // 電話番号
+      ['実験の実施場所を記入してください'], // 実施場所
+      ['実験の所要時間を記入してください。'], // 実験の所要時間
+      ['何時から実験できるかを記入してください（24時間表記）'], // 実験開始時刻
+      ['何時まで実験可能かを記入してください（24時間表記）'], // 実験終了時刻
+      ['利用したいカレンダーのIDをコピペしてください'], // 参照するカレンダー
+      ['実験を開始する日付を記入してください（年/月/日で表記）'], // 実験開始日
+      ['実験の終了予定日を記入してください（年/月/日で表記）'], // 実験最終日
+      ['リマインダーを送信する時刻を記入してください（24時間表記）。実験終了時刻以後にして下さい。なお指定した時刻から1時間以内に送信されます。'], // リマインダー送信時刻
+      ['必要に応じて任意の半角数字列に変更してください。複数指定する場合はカンマで区切ってください。'], // 予約を完了させるトリガー
+      ['必要に応じて変更してください。形式は http://joda-time.sourceforge.net/timezones.html を参照してください。'], // タイムゾーン設定
+      ['自動で送信できるメールの残数の目安です。「担当」機能を使っていると一気に2減ったりします。1日経つと100に近い値に戻ります。'], // 自動送信メール残数
+      ['自分にも予約確認メールを送る場合は1を，送らない場合は0を入力してください。送らない場合は自動送信できる総メール数が増えます（以下同様）。'], // 予約確認メールを自分にも送るか
+      ['自分にも予約完了メールを送る場合は1を，送らない場合は0を入力してください。'], // 予約完了メールを自分にも送るか
+      ['自分にも参加者と同様のリマインダーを送る場合は1を，送らない場合は0を入力してください。'], // リマインダーを自分にも送るか
+      ['翌日の実験予定の一覧を自分にメールする場合は1を，しない場合は0を入力してください。'], // 翌日の実験予定を送るか
+      [
+        'ここを0にすると，formに関わる関数が動作しなくなります。この項目はスプレッドシートだけからメールの自動送信システムだけを使用したい人を想定しています',
+      ], // フォーム周りの関数を使用するか
+      [__default.config_note_template], // 参加者名の列
+      [__default.config_note_template + 'もし利用しない場合は空欄にしてください。'], // ふりがなの列
     ];
 
-    const verAnswer = [
-      ['参加者アドレスの列番号','colAddress', lastCol - 6, note2],
-      ['希望日時の列番号','colExpDate', lastCol - 5, note2]
-    ];
+    // メールテンプレート
+    const template_bodies = {
+      仮予約: [
+        'participantName 様\n',
+        '心理学実験実施責任者のexperimenterNameです。',
+        'この度は心理学実験への応募ありがとうございました。',
+        '予約の確認メールを自動で送信しております。\n',
+        'expDate fromWhen〜toWhen',
+        'で予約を受け付けました（まだ確定はしていません)。',
+        '後日、予約完了のメールを送信いたします。',
+        'もし日時の変更等がある場合は experimenterMailAddress までご連絡ください。',
+        'どうぞよろしくお願いいたします。\n',
+        'experimenterName',
+      ],
+      時間外: [
+        'participantName 様\n',
+        '心理学実験実施責任者のexperimenterNameです。',
+        'この度は心理学実験への応募ありがとうございました。',
+        '申し訳ありませんが、ご希望いただいた',
+        'expDate fromWhen〜toWhen',
+        'は実験実施可能時間（openTime時〜closeTime時）外または、実施期間（openDate〜closeDate）外です。',
+        'お手数ですが、もう一度登録し直していただきますようお願いします。\n',
+        'experimenterName',
+      ],
+      重複: [
+        'participantName 様\n',
+        '心理学実験実施責任者のexperimenterNameです。',
+        'この度は心理学実験への応募ありがとうございました。',
+        '申し訳ありませんが、ご希望いただいた',
+        'expDate fromWhen〜toWhen',
+        'にはすでに予約（予定）が入っており（タッチの差で他の方が予約をされた可能性もあります）、実験を実施することができません。',
+        'お手数ですが、もう一度別の日時で登録し直していただきますようお願いします。\n',
+        'experimenterName',
+      ],
+      予約完了wd: [
+        'participantName 様\n',
+        'この度は心理学実験への応募ありがとうございました。',
+        'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
+        '場所はexperimentRoomです。当日は直接お越しください。',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        '当日もよろしくお願いいたします。\n',
+        '実験責任者experimenterName（当日は他の者が実験担当する可能性があります)',
+        '当日の連絡はexperimenterPhoneまでお願いいたします。',
+      ],
+      予約完了we: [
+        'participantName 様\n',
+        'この度は心理学実験への応募ありがとうございました。',
+        'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
+        '場所はexperimentRoomです。休日は教育学部棟玄関の鍵がかかっており、外から入ることができません。実験開始5分前から玄関前で待機しておりますので、実験開始時間までにお越しください。',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        '当日もよろしくお願いいたします。\n',
+        '実験責任者experimenterName（当日は他の者が実験担当する可能性があります)',
+        '当日の連絡はexperimenterPhoneまでお願いいたします。',
+      ],
+      222: [
+        'participantName 様\n',
+        '心理学実験実施責任者のexperimenterNameです。',
+        'この度は心理学実験への応募ありがとうございました。',
+        '大変申し訳ありませんが、以前実施した同様の実験にご参加いただいており、今回の実験にはご参加いただけません。ご了承ください。\n',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        '今後ともよろしくお願いします。\n',
+        'experimenterName',
+      ],
+      333: [
+        'participantName 様\n',
+        '心理学実験実施責任者のexperimenterNameです。',
+        'この度は心理学実験への応募ありがとうございました。',
+        '大変申し訳ありませんが、応募いただいた段階ですでに募集人数の定員に達していたため、実験に参加していただくことができません。ご了承ください。\n',
+        '今後、次の実験を実施する際に再度応募していただけると幸いです。',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        '今後ともよろしくお願いいたします。\n',
+        'experimenterName',
+      ],
+      リマインダーwd: [
+        'participantName 様\n',
+        '実験者のexperimenterNameです。明日参加していただく実験についての確認のメールをお送りしています。\n',
+        '明日 fromWhenから実験に参加していただく予定となっております。',
+        '場所はexperimentRoomです。実験時間に実験室まで直接お越しください。\n',
+        'なお、実験中は眠くなりやすいため、本日は十分な睡眠を取って実験にお越しください。',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        'それでは明日、よろしくお願いいたします。\n',
+        'experimenterName',
+      ],
+      リマインダーwe: [
+        'participantName 様\n',
+        '実験者のexperimenterNameです。明日参加していただく実験についての確認のメールをお送りしています。\n',
+        '明日 fromWhenから実験に参加していただく予定となっております。',
+        '場所はexperimentRoomです。\n',
+        'なお、明日は休日のため教育学部棟玄関の鍵がかかっており、外から入ることができません。実験者が実験開始5分前から玄関前で待機しておりますので、実験開始時間までにお越しください。\n',
+        'また、実験中は眠くなりやすいため、本日は十分な睡眠を取って実験にお越しください。',
+        'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
+        'それでは明日、よろしくお願いいたします。\n',
+        'experimenterName',
+      ],
+    };
 
-    const otherColConfig = [
-      ['予約ステータスの列番号','colStatus', lastCol - 4, note2],
-      ['「連絡したか」の列番号','colMailed', lastCol - 3, note2],
-      ['リマインド日時の列番号','colRemindDate', lastCol - 2, note2],
-      ['「リマインドしたか」の列番号','colReminded', lastCol - 1, note2],
-      ['担当の列番号','colCharge', lastCol, note2]
-    ];
-
-    if (TYPE == 1) {
-      defaultConfig = defaultConfig.concat(verAnswer).concat(otherColConfig);
-    } else {
-      defaultConfig = defaultConfig.concat(verChoice).concat(otherColConfig);
+    for (const key in template_bodies) {
+      template_bodies[key] = template_bodies[key].join('\n');
     }
+
+    const not_used = '利用する場合はここに本文を記載するとともに土日での変更の数字を1に変えてください。なお，改行は"alt + enter"です';
+
+    __default.templates = [
+      ['トリガー', '休日での変更', '題名', '本文（平日）', '本文（土日祝）'],
+      ['仮予約', 0, '予約の確認', template_bodies['仮予約'], not_used],
+      ['時間外', 0, '実験実施可能時間外です', template_bodies['時間外'], not_used],
+      ['重複', 0, '予約が重複しています', template_bodies['重複'], not_used],
+      [111, 1, '実験予約が完了いたしました', template_bodies['予約完了wd'], template_bodies['予約完了we']],
+      [222, 0, '以前に実験にご参加いただいたことがあります', template_bodies[222], not_used],
+      [333, 0, '定員に達してしまいました', template_bodies[333], not_used],
+      ['リマインダー', 1, '明日実施の心理学実験のリマインダー', template_bodies['リマインダーwd'], template_bodies['リマインダーwe']],
+    ];
+
+    const note =
+      '適宜変更してください。参加者名は participantName ，実験実施時間は fromWhen および toWhen に代入されます。その他のキーは設定シートを参照してください。';
+
+    __default.templates_note = __default.templates.map((_, idx) => {
+      if (idx == 0) {
+        return [null, null];
+      }
+      return [note, note];
+    });
+
+    // メンバー
+    const sh_name_answers = __sheet_answers.getName();
+    const last_column = __sheet_answers.getLastColumn();
+    const last_col_notation = __sheet_answers.getRange(1, last_column).getA1Notation().replace(/\d/, ''); // 列のアルファベットを取得
+    const formula = `=COUNTIF('${sh_name_answers}'!${last_col_notation}:${last_col_notation}, A2)`;
+    __default.members = [
+      ['キー', '名前', 'アドレス', '担当回数'],
+      [1, 'りんご', 'apple@hogege.com', formula],
+      [2, 'ごりら', 'gorilla@hogege.com', ''],
+      [3, 'らっぱ', 'horn@hogege.com', ''],
+    ];
+
+    // 空き予定
+    __default.available = [];
+    for (const now = new Date(); now <= close_date; now.setDate(now.getDate() + 1)) {
+      const new_row = [];
+      new_row.push(fmtDate(now, 'yyyy/MM/dd'));
+      now.setHours(9, 0, 0);
+      const close_time = 19;
+      const exp_length = 60;
+      for (const cur_time = new Date(now); cur_time.getHours() < close_time; cur_time.setMinutes(cur_time.getMinutes() + exp_length)) {
+        new_row.push(fmtDate(cur_time, 'HH:mm'));
+      }
+      __default.available.push(new_row);
+    }
+  }
+
+  function __addNewColNames() {
+    const current_colnms = __sheet_answers.getRange(1, 1, 1, __sheet_answers.getLastColumn()).getValues()[0];
+    const new_colnms = ['予約ステータス', '連絡したか', 'リマインド日時', 'リマインドしたか', '担当'];
+    const colnms = current_colnms.concat(new_colnms);
+    __sheet_answers.getRange(1, 1, 1, colnms.length).setValues([colnms]);
+  }
+
+  function __createConfig() {
+    sheets.ss.insertSheet('設定');
+    const sh = sheets.ss.getSheetByName('設定');
+    const last_column = __sheet_answers.getLastColumn() - 1;
+    const extra_config_type1 = [
+      ['参加者アドレスの列', 'colAddress', numToColumnNotation(last_column - 6)],
+      ['希望日時の列', 'colExpDate', numToColumnNotation(last_column - 5)],
+    ];
+
+    const extra_config_type2 = [
+      ['参加者アドレスの列', 'colAddress', numToColumnNotation(last_column - 7)],
+      ['希望日の列', 'colExpDate', numToColumnNotation(last_column - 6)],
+      ['希望時間の列', 'colExpTime', numToColumnNotation(last_column - 5)],
+    ];
+
+    const extra_config_common = [
+      ['予約ステータスの列', 'colStatus', numToColumnNotation(last_column - 4)],
+      ['「連絡したか」の列', 'colMailed', numToColumnNotation(last_column - 3)],
+      ['リマインド日時の列', 'colRemindDate', numToColumnNotation(last_column - 2)],
+      ['「リマインドしたか」の列', 'colReminded', numToColumnNotation(last_column - 1)],
+      ['担当の列', 'colAssistant', numToColumnNotation(last_column)],
+    ];
+
+    let extra_config;
+    if (TYPE == 1 || TYPE == 3) {
+      extra_config = extra_config_type1.concat(extra_config_common);
+    } else if (TYPE == 2) {
+      extra_config = extra_config_type2.concat(extra_config_common);
+    }
+
+    __default.config.push(...extra_config);
+    const extra_config_notes = extra_config.map(() => [__default.config_note_template]);
+    __default.config_notes.push(...extra_config_notes);
 
     // 値の設定
-    const configNRow = defaultConfig.length;
-    const configNCol = defaultConfig[0].length;
-    sheetConfig.getRange(1, 1, configNRow, configNCol).setValues(defaultConfig);
+    const nrow = __default.config.length;
+    const ncol = __default.config[0].length;
+    sh.getRange(1, 1, nrow, ncol).setValues(__default.config);
+
+    // 注釈
+    sh.getRange(1, 3, nrow, 1).setNotes(__default.config_notes);
+
     // 書式の設定
-    rowRemainingMails = getRowIDContainTarget(defaultConfig, 1, 'remainingMails');
-    sheetConfig.getRange(rowRemainingMails, 3).setFontColor('#FF0000');
-    sheetConfig.getRange(2, 2, configNRow - 1, 1).setFontColor("#C8C8C8");
-    sheetConfig.setColumnWidth(1, 202);
-    sheetConfig.autoResizeColumn(3);
-    sheetConfig.getRange(2, 3, 10, 1).setBorder(true, true, true, true, false, false, "black", SpreadsheetApp.BorderStyle.SOLID_THICK);
-
-    // メールのテンプレート用シート
-    const sheetTemplate = SS.getSheetByName('テンプレート');
-
-    // successful 仮予約
-    const tentativeBooking = [
-      'participantName 様\n',
-      '心理学実験実施責任者のexperimenterNameです。',
-      'この度は心理学実験への応募ありがとうございました。',
-      '予約の確認メールを自動で送信しております。\n',
-      'expDate fromWhen〜toWhen',
-      'で予約を受け付けました（まだ確定はしていません)。',
-      '後日、予約完了のメールを送信いたします。',
-      'もし日時の変更等がある場合は experimenterMailAddress までご連絡ください。',
-      'どうぞよろしくお願いいたします。\n',
-      'experimenterName'
-    ];
-    // --- Failed 仮予約シリーズ ---
-    // 時間外・期間外
-    const outOfTime = [
-      'participantName 様\n',
-      '心理学実験実施責任者のexperimenterNameです。',
-      'この度は心理学実験への応募ありがとうございました。',
-      '申し訳ありませんが、ご希望いただいた',
-      'expDate fromWhen〜toWhen',
-      'は実験実施可能時間（openTime時〜closeTime時）外または、実施期間（openDate〜closeDate）外です。',
-      'お手数ですが、もう一度登録し直していただきますようお願いします。\n',
-      'experimenterName'
-    ];
-    // 重複
-    const overlap = [
-      'participantName 様\n',
-      '心理学実験実施責任者のexperimenterNameです。',
-      'この度は心理学実験への応募ありがとうございました。',
-      '申し訳ありませんが、ご希望いただいた',
-      'expDate fromWhen〜toWhen',
-      'にはすでに予約（予定）が入っており（タッチの差で他の方が予約をされた可能性もあります）、実験を実施することができません。',
-      'お手数ですが、もう一度別の日時で登録し直していただきますようお願いします。\n',
-      'experimenterName'
-    ];
-    // --- Successful Booking ---
-    // 予約完了テキスト(平日)
-    const weekdayBookingDone = [
-      'participantName 様\n',
-      'この度は心理学実験への応募ありがとうございました。',
-      'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
-      '場所はexperimentRoomです。当日は直接お越しください。',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      '当日もよろしくお願いいたします。\n',
-      '実験責任者experimenterName（当日は他の者が実験担当する可能性があります)',
-      '当日の連絡はexperimenterPhoneまでお願いいたします。'
-    ];
-    // 予約完了テキスト(休日)
-    const holidayBookingDone = [
-      'participantName 様\n',
-      'この度は心理学実験への応募ありがとうございました。',
-      'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
-      '場所はexperimentRoomです。休日は教育学部棟玄関の鍵がかかっており、外から入ることができません。実験開始5分前から玄関前で待機しておりますので、実験開始時間までにお越しください。',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      '当日もよろしくお願いいたします。\n',
-      '実験責任者experimenterName（当日は他の者が実験担当する可能性があります)',
-      '当日の連絡はexperimenterPhoneまでお願いいたします。'
-    ];
-    // --- Rejected Booking ---
-    // 既参加
-    const alreadyParticipated = [
-      'participantName 様\n',
-      '心理学実験実施責任者のexperimenterNameです。',
-      'この度は心理学実験への応募ありがとうございました。',
-      '大変申し訳ありませんが、以前実施した同様の実験にご参加いただいており、今回の実験にはご参加いただけません。ご了承ください。\n',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      '今後ともよろしくお願いします。\n',
-      'experimenterName'
-    ];
-    // 定員オーバー
-    const reachedCapacity = [
-      'participantName 様\n',
-      '心理学実験実施責任者のexperimenterNameです。',
-      'この度は心理学実験への応募ありがとうございました。',
-      '大変申し訳ありませんが、応募いただいた段階ですでに募集人数の定員に達していたため、実験に参加していただくことができません。ご了承ください。\n',
-      '今後、次の実験を実施する際に再度応募していただけると幸いです。',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      '今後ともよろしくお願いいたします。\n',
-      'experimenterName'
-    ];
-
-    // --- Reminders ---
-    // リマインダー(平日)
-    const reminderWeekday =[
-      'participantName 様\n',
-      '実験者のexperimenterNameです。明日参加していただく実験についての確認のメールをお送りしています。\n',
-      '明日 fromWhenから実験に参加していただく予定となっております。',
-      '場所はexperimentRoomです。実験時間に実験室まで直接お越しください。\n',
-      'なお、実験中は眠くなりやすいため、本日は十分な睡眠を取って実験にお越しください。',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      'それでは明日、よろしくお願いいたします。\n',
-      'experimenterName'
-    ];
-    // リマインダー(休日)
-    const reminderHoliday =[
-      'participantName 様\n',
-      '実験者のexperimenterNameです。明日参加していただく実験についての確認のメールをお送りしています。\n',
-      '明日 fromWhenから実験に参加していただく予定となっております。',
-      '場所はexperimentRoomです。\n',
-      'なお、明日は休日のため教育学部棟玄関の鍵がかかっており、外から入ることができません。実験者が実験開始5分前から玄関前で待機しておりますので、実験開始時間までにお越しください。\n',
-      'また、実験中は眠くなりやすいため、本日は十分な睡眠を取って実験にお越しください。',
-      'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
-      'それでは明日、よろしくお願いいたします。\n',
-      'experimenterName'
-    ];
-
-    const notUsed = '利用する場合はここに本文を記載するとともに土日での変更の数字を1に変えてください。なお，改行は"alt + enter"です';
-
-    const note = '適宜変更してください。参加者名は participantName ，実験実施時間は fromWhen および toWhen に代入されます。その他のキーは設定シートを参照してください。';
-
-    // これでいけるかも
-    const bodies = {
-      "仮予約":tentativeBooking,
-      '時間外':outOfTime,
-      "重複":overlap,
-      "予約完了wd":weekdayBookingDone,
-      "予約完了we":holidayBookingDone,
-      222:alreadyParticipated,
-      333:reachedCapacity,
-      "リマインダーwd":reminderWeekday,
-      "リマインダーwe":reminderHoliday
-    };
-
-    for (key in bodies) {
-      bodies[key] = bodies[key].join('\n');
-    };
-
-    const defaultTemplate = [
-      ['トリガー', '休日での変更', '題名', '本文（平日）', '本文（土日祝）', '備考'],
-      ['仮予約', 0, '予約の確認', bodies['仮予約'], notUsed, note],
-      ['時間外', 0, '実験実施可能時間外です', bodies['時間外'], notUsed, note],
-      ['重複', 0, '予約が重複しています', bodies['重複'], notUsed, note],
-      [111, 1, '実験予約が完了いたしました', bodies['予約完了wd'], bodies['予約完了we'], note],
-      [222, 0, '以前に実験にご参加いただいたことがあります', bodies[222], notUsed, note],
-      [333, 0, '定員に達してしまいました', bodies[333], notUsed, note],
-      ['リマインダー', 1, '明日実施の心理学実験のリマインダー', bodies['リマインダーwd'], bodies['リマインダーwe'], note]
-    ];
-    const tempNRow = defaultTemplate.length;
-    const tempNCol = defaultTemplate[0].length;
-    var tempAllArea = sheetTemplate.getRange(1, 1, tempNRow, tempNCol);
-    tempAllArea.setValues(defaultTemplate);
-    // 体裁を整える
-    tempAllArea.setVerticalAlignment("top");
-    sheetTemplate.setColumnWidth(4, 500);
-    sheetTemplate.setColumnWidth(5, 500);
-    var defaultWraps = [];
-    for (var i = 0; i < tempNRow; i++) {
-      defaultWraps.push([false,false,true,true,true,false]);
-    }
-    tempAllArea.setWraps(defaultWraps);
-
-
-    // メンバーシートの設定
-    const sheetMember = SS.getSheetByName('メンバー');
-    const sh1Name = sheetAnswers.getName();
-    const sh1LastCol = sheetAnswers.getLastColumn();
-    const sh1LColNotation = sheetAnswers.getRange(1, sh1LastCol).getA1Notation().replace(/\d/,''); // 列のアルファベットを取得
-    const formula = "=COUNTIF('" + sh1Name + "'!" + sh1LColNotation + ":" + sh1LColNotation + ", A2)"
-    Logger.log([sh1Name, sh1LastCol, sh1LColNotation, formula]);
-    const defaultMember = [
-      ['キー', '名前', 'アドレス', '担当回数', '備考'],
-      [1, 'りんご', 'apple@hogege.com', formula,'Gmailのアドレスでなくても大丈夫です。'],
-      [2, 'ごりら', 'gorilla@hogege.com','',''],
-      [3, 'らっぱ', 'horn@hogege.com','','']
-    ];
-    const memNRow = defaultMember.length;
-    const memNCol = defaultMember[0].length;
-    sheetMember.getRange(1, 1, memNRow, memNCol).setValues(defaultMember);
-
-    sheetConfig.activate(); // 設定画面を開く
-  } catch(err) {
-    const fb = "[line " + err.lineNumber + "] " +err.message;
-    Logger.log(fb);
-    Browser.msgBox("エラーが発生しました", fb, Browser.Buttons.OK);
+    sh.getRange(15, 3).setFontColor('#FF0000'); // メールの残数のセルを赤色にする
+    sh.getRange(2, 2, nrow - 1, 1).setFontColor('#C8C8C8');
+    sh.autoResizeColumn(1);
+    sh.autoResizeColumn(3);
+    sh.getRange(2, 3, 1, 1).setBorder(true, true, true, true, false, false, 'black', SpreadsheetApp.BorderStyle.SOLID_THICK);
+    sh.getRange(4, 3, 8, 1).setBorder(true, true, true, true, false, false, 'black', SpreadsheetApp.BorderStyle.SOLID_THICK);
+    sh.getRange(16, 3, 5, 1).setBorder(true, true, true, true, false, false, 'black', SpreadsheetApp.BorderStyle.SOLID_THICK);
   }
-}
+
+  function __createMailTemplate() {
+    sheets.ss.insertSheet('テンプレート');
+    const sh = sheets.ss.getSheetByName('テンプレート');
+    const rng = sh.getRange(1, 1, __default.templates.length, __default.templates[0].length);
+    rng.setValues(__default.templates);
+    // 体裁を整える
+    rng.setVerticalAlignment('top');
+    sh.setColumnWidth(4, 500);
+    sh.setColumnWidth(5, 500);
+    const cell_text_wrap = __default.templates.map(() => [false, false, true, true, true]);
+    rng.setWraps(cell_text_wrap);
+
+    // 注釈の設定
+    sh.getRange(1, 4, __default.templates_note.length, __default.templates_note[0].length).setNotes(__default.templates_note);
+  }
+
+  function __createMembers() {
+    // メンバーシートの設定
+    sheets.ss.insertSheet('メンバー');
+    const sh = sheets.ss.getSheetByName('メンバー');
+    sh.getRange(1, 1, __default.members.length, __default.members[0].length).setValues(__default.members);
+    sh.getRange(1, 3).setNote('Gmailのアドレスでなくても大丈夫です。');
+  }
+
+  function __createAvailable() {
+    // 空き予定シートの設定
+    sheets.ss.insertSheet('空き予定');
+    const sh = sheets.ss.getSheetByName('空き予定');
+    sh.getRange(1, 1, __default.available.length, __default.available[0].length).setValues(__default.available);
+  }
+
+  return {
+    create() {
+      if (sheets.length > 2) {
+        sheets.sheets.forEach((sh, idx) => {
+          if (idx > 0) {
+            sheets.ss.deleteSheet(sh);
+          }
+        });
+      } else {
+        // フォームの回答に新しい列を追加する
+        __addNewColNames();
+      }
+      __createDefault();
+      __createConfig();
+      __createMailTemplate();
+      __createMembers();
+      if (TYPE == 3) {
+        __createAvailable();
+      }
+      sheets.ss.insertSheet('Cached');
+      sheets.update();
+      settings.retrieve().save();
+      sheets.ss.getSheetByName('設定').activate(); // 設定画面を開く
+    },
+  };
+})();
