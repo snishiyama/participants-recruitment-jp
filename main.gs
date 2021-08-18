@@ -737,10 +737,9 @@ const booking = (function () {
     sheets.sheets[0].getRange(numRow, settings.config.colMailed + 1, 1, __status.length).setValues([__status]);
     // カレンダーの編集
     // まず予約イベントを削除する
-    const oldEventName = '仮予約:' + __name;
     const events = __calendar.getEvents(__from, __to);
     events.forEach((e) => {
-      if (e.getTitle() == oldEventName) e.deleteEvent();
+      if (e.getTitle().includes(__name)) e.deleteEvent();
     });
     if (__valid) {
       //予約確定情報をカレンダーに追加
