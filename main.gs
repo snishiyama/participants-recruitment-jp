@@ -991,6 +991,10 @@ const schedule = (function () {
     __available = new Map();
     for (let row = 0; row < available_array.length; row++) {
       let available_date = available_array[row][0];
+      // A列に日付が適切に入力されていないなら処理をスキップする
+      if (!is(available_date, 'Date')) {
+        continue;
+      }
       let key = fmtDate(available_date, 'yyyy/MM/dd');
       let datetimes = [];
       for (let col = 1; col < available_array[row].length; col++) {
