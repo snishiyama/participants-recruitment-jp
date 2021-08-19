@@ -84,9 +84,9 @@ function onSheetEdit(e) {
           alertInitWithChangeOf('参照するカレンダー');
         } else if (settings.config.experimentLength != oldConfig.experimentLength) {
           alertInitWithChangeOf('実験の所要時間');
-        } else if (settings.config.openTime != oldConfig.openTime) {
+        } else if (fmtDate(settings.config.openTime, 'HH:mm') != fmtDate(new Date(oldConfig.openTime), 'HH:mm')) {
           alertInitWithChangeOf('実験の開始時刻');
-        } else if (settings.config.closeTime != oldConfig.closeTime) {
+        } else if (fmtDate(settings.config.closeTime, 'HH:mm') != fmtDate(new Date(oldConfig.closeTime), 'HH:mm')) {
           alertInitWithChangeOf('実験の終了時刻');
         }
       } else if (sheetName == 'メンバー' || sheetName == 'テンプレート') {
@@ -399,14 +399,36 @@ const settings = (function () {
       }
     } else {
       __settings = JSON.parse(cache_json);
-      // parseしたままだと以下の2つがstringのままで機能しない
-      __settings.config.openDate = new Date(__settings.config.openDate);
-      __settings.config.closeDate = new Date(__settings.config.closeDate);
+      __arrangeExpPeriod();
     }
-    __arrangeExpPeriod();
   }
 
   function __arrangeExpPeriod() {
+    // parseしたままだと以下の2つがstringのままで機能しない。
+    // シートから直接値を取得した場合は問題ないが，それほど処理速度に影響が出るとも思えないので，処理を分けない
+    __settings.config.openDate = new Date(__settings.config.openDate);
+    __settings.config.closeDate = new Date(__settings.config.closeDate);
+
+    // openTime, closeTime
+    let temp_date = new Date();
+    if (is(__settings.config.openTime, 'String')) {
+      __settings.config.openTime = new Date(__settings.config.openTime);
+    } else if (is(__settings.config.openTime, 'Number')) {
+      temp_date.setHours(__settings.config.openTime, 0, 0, 0);
+      __settings.config.openTime = new Date(temp_date);
+    }
+    if (is(__settings.config.closeTime, 'String')) {
+      __settings.config.closeTime = new Date(__settings.config.closeTime);
+    } else if (is(__settings.config.closeTime, 'Number')) {
+      temp_date.setHours(__settings.config.closeTime, 0, 0, 0);
+      __settings.config.closeTime = new Date(temp_date);
+    }
+    if (__settings.config.openTime.toString() == 'Invalid Date') {
+      throw new Error('開始時刻の設定が適切ではありません。"10:00" のような時間表記 あるいは "10" のような"時"だけを示す数値を入力してください。');
+    } else if (__settings.config.closeTime.toString() == 'Invalid Date') {
+      throw new Error('終了時刻の設定が適切ではありません。"10:00" のような時間表記 あるいは "10" のような"時"だけを示す数値を入力してください。');
+    }
+
     // 実験開始日・終了日の調整
     __settings.config.outOfDate = false;
     const now = new Date();
@@ -417,8 +439,12 @@ const settings = (function () {
       __settings.config.outOfDate = true;
     }
     // 実験開始日・終了日の日時の設定
-    __settings.config.openDate.setHours(__settings.config.openTime, 0, 0);
-    __settings.config.closeDate.setHours(__settings.config.closeTime, 0, 0);
+    const openHour = __settings.config.openTime.getHours();
+    const openMin = __settings.config.openTime.getMinutes();
+    const closeHour = __settings.config.closeTime.getHours();
+    const closeMin = __settings.config.closeTime.getMinutes();
+    __settings.config.openDate.setHours(openHour, openMin, 0, 0);
+    __settings.config.closeDate.setHours(closeHour, closeMin, 0, 0);
   }
 
   if (sheets.length > 1) {
@@ -682,7 +708,9 @@ const booking = (function () {
     if (__from === undefined || __to === undefined) {
       return false;
     }
-    const isValidTime = settings.config.openTime <= __from.getHours() && __to.getHours() <= settings.config.closeTime;
+    settings.config.openTime.setFullYear(__from.getFullYear(), __from.getMonth(), __from.getDate());
+    settings.config.closeTime.setFullYear(__from.getFullYear(), __from.getMonth(), __from.getDate());
+    const isValidTime = settings.config.openTime <= __from && __to <= settings.config.closeTime;
     const isValidDate = settings.config.openDate <= __from && __from <= settings.config.closeDate;
     return isValidTime && isValidDate;
   }
@@ -754,7 +782,7 @@ const booking = (function () {
       //予約確定情報をカレンダーに追加
       let newEventName = '予約完了:' + __name;
       if (settings.config.colParNameKana > 0) {
-        newEventName = newEventName + '(' + array[settings.config.colParNameKana] + ')';
+        newEventName = newEventName + '(' + __values[settings.config.colParNameKana] + ')';
       }
       __calendar.createEvent(newEventName, __from, __to);
     }
@@ -998,7 +1026,7 @@ const schedule = (function () {
       let key = fmtDate(available_date, 'yyyy/MM/dd');
       let datetimes = [];
       for (let col = 1; col < available_array[row].length; col++) {
-        let available_time = available_array[row][col]; // HH:mm -> [HH, mm]
+        let available_time = available_array[row][col];
         if (is(available_time, 'Date')) {
           available_time.setFullYear(available_date.getFullYear(), available_date.getMonth(), available_date.getDate());
           // 空き予定でない場合は空文字にする
@@ -1019,11 +1047,10 @@ const schedule = (function () {
     const stime = new Date(datetime);
     const etime = new Date(stime);
     etime.setMinutes(etime.getMinutes() + settings.config.experimentLength);
+    settings.config.closeTime.setFullYear(etime.getFullYear(), etime.getMonth(), etime.getDate());
 
     // 計算された終了時刻が設定されている終了時刻を超えていないか
-    if (etime.getHours() > settings.config.closeTime) {
-      return false;
-    } else if (etime.getHours() == settings.config.closeTime && etime.getMinutes() > 0) {
+    if (etime > settings.config.closeTime) {
       return false;
     }
 
@@ -1073,11 +1100,12 @@ const schedule = (function () {
       for (let now = new Date(settings.config.openDate); now <= settings.config.closeDate; now.setDate(now.getDate() + 1)) {
         const new_row = [];
         new_row.push(new Date(now));
-        while (now.getHours() < settings.config.closeTime) {
+        settings.config.closeTime.setFullYear(now.getFullYear(), now.getMonth(), now.getDate());
+        while (now < settings.config.closeTime) {
           new_row.push(new Date(now));
           now.setMinutes(now.getMinutes() + settings.config.experimentLength);
         }
-        now.setHours(settings.config.openTime, 0, 0); // for 文の終了条件での比較のため
+        now.setHours(settings.config.openTime.getHours(), settings.config.openTime.getMinutes(), 0, 0); // for 文の終了条件での比較のため
         available_array.push(new_row);
       }
       __getAvailable(available_array);
