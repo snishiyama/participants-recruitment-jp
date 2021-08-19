@@ -1,3 +1,6 @@
+// Copyright (c) 2017, Sho Ishiguro. All rights reserved.
+// Use of this source code is governed by the BSD 2-Clause License
+
 const TYPE = 3; // 1: 自由回答, 2: 選択式 どちらかの半角数字を入れてください。
 
 function init() {
