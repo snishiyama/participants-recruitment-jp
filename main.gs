@@ -31,13 +31,13 @@ function onFormSubmission(e) {
       // mail
       mail.create(name, trigger, fromWhen, toWhen).setBcc('', settings.config.selfBccTentative).send(address).alertFewMails();
       onCalendarUpdated();
-      Logger.log('SUCCESS!');
+      console.log('SUCCESS!');
     } else {
-      Logger.log(e.values);
+      console.log(e.values);
     }
   } catch (err) {
-    const msg = `[${err.name}] ${err.message}`;
-    Logger.log(msg);
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
     MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
   }
 }
@@ -97,8 +97,8 @@ function onSheetEdit(e) {
     }
   } catch (err) {
     //実行に失敗した時に通知
-    const msg = `[${err.name}] ${err.message}`;
-    Logger.log(msg);
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
     dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
     // Browser.msgBox('エラーが発生しました', msg, Browser.Buttons.OK);
   }
@@ -144,8 +144,8 @@ function onClock() {
     }
   } catch (err) {
     //実行に失敗した時に通知
-    const msg = `[${err.name}] ${err.message}`;
-    Logger.log(msg);
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
     MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
   }
 }
@@ -160,8 +160,8 @@ function onCalendarUpdated() {
     form.modify();
   } catch (err) {
     //実行に失敗した時に通知
-    const msg = `[${err.name}] ${err.message}`;
-    Logger.log(msg);
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
     MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
   }
 }
@@ -1136,8 +1136,8 @@ settings.init = function () {
     }
   } catch (err) {
     //実行に失敗した時に通知
-    const msg = `[${err.name}] ${err.message}`;
-    Logger.log(msg);
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
     dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
     // Browser.msgBox('エラーが発生しました', msg, Browser.Buttons.OK);
   }
