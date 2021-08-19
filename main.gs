@@ -336,7 +336,13 @@ const settings = (function () {
       let key = table[row][1];
       let val = zenToHan(table[row][2]); // 念の為
       if (key.indexOf('col') == 0) {
-        val = columnNotationToNum(val); // 列番号に関する設定は，Numberに変更しておく
+        const is_alphabet = new RegExp(/^[a-zA-Z]*$/);
+        if (!is_alphabet.test(val)) {
+          throw new Error(
+            `${key}に英字以外が入力されています。列に関する設定には英字を入力してください。一見，英字を入力しているにもかかわらずこのエラーが表示される場合は，入力内容にスペースが含まれているかもしれません。`
+          );
+        }
+        val = columnNotationToNum(val.toUpperCase()); // 列番号に関する設定は，Numberに変更しておく
       }
       __settings.config[key] = val;
     }
