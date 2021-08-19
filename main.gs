@@ -1,7 +1,7 @@
 // Copyright (c) 2017, Sho Ishiguro. All rights reserved.
 // Use of this source code is governed by the BSD 2-Clause License
 
-const TYPE = 3; // 1: 自由回答, 2: 選択式 どちらかの半角数字を入れてください。
+const TYPE = 3; // 1: 自由回答, 2 or 3: 選択式 どちらかの半角数字を入れてください。
 
 function init() {
   settings.init();
@@ -1142,6 +1142,7 @@ settings.default = (function () {
   const __default = {};
 
   function __createDefault() {
+    const default_timezone = 'Asia/Tokyo';
     const close_date = new Date();
     close_date.setDate(new Date().getDate() + 13);
     __default.config = [
@@ -1154,8 +1155,8 @@ settings.default = (function () {
       ['実験開始可能時刻', 'openTime', 9],
       ['実験終了時刻', 'closeTime', 19],
       ['参照するカレンダー', 'workingCalendar', Session.getActiveUser().getEmail()],
-      ['実験開始日', 'openDate', Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd')],
-      ['実験最終日', 'closeDate', Utilities.formatDate(close_date, 'Asia/Tokyo', 'yyyy/MM/dd')],
+      ['実験開始日', 'openDate', Utilities.formatDate(new Date(), default_timezone, 'yyyy/MM/dd')],
+      ['実験最終日', 'closeDate', Utilities.formatDate(close_date, default_timezone, 'yyyy/MM/dd')],
       ['リマインダー送信時刻', 'remindHour', 19],
       ['予約を完了させるトリガー', 'finalizeTrigger', 111],
       ['タイムゾーン設定', 'expTimeZone', 'Asia/Tokyo'],
@@ -1336,12 +1337,12 @@ settings.default = (function () {
     __default.available = [];
     for (const now = new Date(); now <= close_date; now.setDate(now.getDate() + 1)) {
       const new_row = [];
-      new_row.push(fmtDate(now, 'yyyy/MM/dd'));
+      new_row.push(Utilities.formatDate(now, default_timezone, 'yyyy/MM/dd'));
       now.setHours(9, 0, 0);
       const close_time = 19;
       const exp_length = 60;
       for (const cur_time = new Date(now); cur_time.getHours() < close_time; cur_time.setMinutes(cur_time.getMinutes() + exp_length)) {
-        new_row.push(fmtDate(cur_time, 'HH:mm'));
+        new_row.push(Utilities.formatDate(now, default_timezone, 'HH:mm'));
       }
       __default.available.push(new_row);
     }
