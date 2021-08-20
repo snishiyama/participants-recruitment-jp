@@ -12,9 +12,18 @@ function init() {
 ///////////////////////////////////////////////////////////////////////////////
 
 function onOpening() {
-  SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'onCalendarUpdated').addToUi();
-  if (sheets.length > 1) {
-    mail.alertFewMails();
+  try {
+    if (sheets.length > 1) {
+      mail.alertFewMails();
+      if (TYPE == 3) {
+        SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'updateFormAndSchedule').addToUi();
+      }
+    }
+  } catch (err) {
+    //実行に失敗した時に通知
+    const msg = `[${err.name}] ${err.stack}`;
+    console.error(msg);
+    dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
   }
 }
 
@@ -31,7 +40,7 @@ function onFormSubmission(e) {
       const { name, address, from: fromWhen, to: toWhen, trigger } = booking;
       // mail
       mail.create(name, trigger, fromWhen, toWhen).setBcc('', settings.config.selfBccTentative).send(address).alertFewMails();
-      onCalendarUpdated();
+      updateFormAndSchedule();
       console.log('SUCCESS!');
     } else {
       console.log(e.values);
@@ -94,7 +103,7 @@ function onSheetEdit(e) {
       } else if (sheetName == 'メンバー' || sheetName == 'テンプレート') {
         settings.collect(sheetName, true).save(); // 新しいキャッシュを作成
       } else if (sheetName == '空き予定') {
-        onCalendarUpdated();
+        updateFormAndSchedule();
       }
     }
     sheets.ss.toast('スクリプトが終了しました。', '', 3);
@@ -153,21 +162,21 @@ function onClock() {
   }
 }
 
-function onCalendarUpdated() {
-  try {
-    // type 3の時だけ動作させる
-    if (TYPE != 3) {
-      return;
-    }
-    schedule.update().allocate(); // スケジュールを更新してシートに反映する
-    form.modify();
-  } catch (err) {
-    //実行に失敗した時に通知
-    const msg = `[${err.name}] ${err.stack}`;
-    console.error(msg);
-    dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
-  }
-}
+// function onCalendarUpdated() {
+//   try {
+//     // type 3の時だけ動作させる
+//     if (TYPE != 3) {
+//       return;
+//     }
+//     schedule.update().allocate(); // スケジュールを更新してシートに反映する
+//     form.modify();
+//   } catch (err) {
+//     //実行に失敗した時に通知
+//     const msg = `[${err.name}] ${err.stack}`;
+//     console.error(msg);
+//     dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
+//   }
+// }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Utility functions
@@ -257,6 +266,15 @@ function alertInitWithChangeOf(changed) {
     schedule.init();
     form.modify();
   }
+}
+
+function updateFormAndSchedule() {
+  // type 3の時だけ動作させる
+  if (TYPE != 3) {
+    return;
+  }
+  schedule.update().allocate(); // スケジュールを更新してシートに反映する
+  form.modify();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1497,7 +1515,7 @@ settings.default = (function () {
       __createMembers();
       if (TYPE == 3) {
         __createAvailable();
-        SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'onCalendarUpdated').addToUi();
+        SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'updateFormAndSchedule').addToUi();
       }
       sheets.ss.insertSheet('Cached');
       sheets.update();
