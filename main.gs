@@ -564,16 +564,17 @@ const mail = (function () {
       if (template.changeByDay == 1 && isHoliday(from)) {
         __body = template.bodywe;
       }
-      settings.config.participantName = name;
-      settings.config.expDate = fmtDate(from, 'MM/dd（yobi）');
-      settings.config.fromWhen = fmtDate(from, 'HH:mm');
-      settings.config.toWhen = fmtDate(to, 'HH:mm');
-      settings.config.openDate = fmtDate(settings.config.openDate, 'yyyy/MM/dd');
-      settings.config.closeDate = fmtDate(settings.config.closeDate, 'yyyy/MM/dd');
+      const config = copy(settings.config);
+      config.participantName = name;
+      config.expDate = fmtDate(from, 'MM/dd（yobi）');
+      config.fromWhen = fmtDate(from, 'HH:mm');
+      config.toWhen = fmtDate(to, 'HH:mm');
+      config.openDate = fmtDate(settings.config.openDate, 'yyyy/MM/dd');
+      config.closeDate = fmtDate(settings.config.closeDate, 'yyyy/MM/dd');
       // メールの本文の変数を置換する
-      for (const key in settings.config) {
+      for (const key in config) {
         let regex = new RegExp(key, 'g');
-        __body = __body.replace(regex, settings.config[key]);
+        __body = __body.replace(regex, config[key]);
       }
 
       return this;
