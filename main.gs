@@ -12,6 +12,7 @@ function init() {
 ///////////////////////////////////////////////////////////////////////////////
 
 function onOpening() {
+  SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'onCalendarUpdated').addToUi();
   if (sheets.length > 1) {
     mail.alertFewMails();
   }
@@ -80,7 +81,7 @@ function onSheetEdit(e) {
           scriptTriggers.updateClockTrigger(settings.config.remindHour, settings.config.expTimeZone);
         } else if (settings.config.workingCalendar != oldConfig.workingCalendar) {
           schedule.calendar = CalendarApp.getCalendarById(settings.config.workingCalendar);
-          scriptTriggers.updateCalendarTrigger(settings.config.workingCalendar);
+          // scriptTriggers.updateCalendarTrigger(settings.config.workingCalendar);
           alertInitWithChangeOf('参照するカレンダー');
         } else if (settings.config.experimentLength != oldConfig.experimentLength) {
           alertInitWithChangeOf('実験の所要時間');
@@ -162,7 +163,7 @@ function onCalendarUpdated() {
     //実行に失敗した時に通知
     const msg = `[${err.name}] ${err.stack}`;
     console.error(msg);
-    MailApp.sendEmail(settings.config.experimenterMailAddress, 'エラーが発生しました', msg);
+    dlg.alert('エラーが発生しました', msg, dlg.ui.ButtonSet.OK);
   }
 }
 
@@ -257,8 +258,8 @@ function alertInitWithChangeOf(changed) {
   if (choice == dlg.ui.Button.OK) {
     schedule.init();
     form.modify();
+    dlg.alert('空き予定の初期化', '空き予定の初期化が終了しました。適宜情報を変更してください。', dlg.ui.ButtonSet.OK);
   }
-  dlg.alert('空き予定の初期化', '空き予定の初期化が終了しました。適宜情報を変更してください。', dlg.ui.ButtonSet.OK);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -976,7 +977,7 @@ const scriptTriggers = (function () {
       ScriptApp.newTrigger('onFormSubmission').forSpreadsheet(sheets.ss).onFormSubmit().create();
       ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(sheets.ss).onEdit().create();
       ScriptApp.newTrigger('onClock').timeBased().atHour(19).nearMinute(30).everyDays(1).inTimezone('Asia/Tokyo').create();
-      ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(Session.getActiveUser().getEmail()).onEventUpdated().create();
+      // ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(Session.getActiveUser().getEmail()).onEventUpdated().create();
     },
 
     updateClockTrigger: function (newHour, timeZone) {
@@ -988,14 +989,14 @@ const scriptTriggers = (function () {
       });
     },
 
-    updateCalendarTrigger: function (calendar_id) {
-      this.triggers.forEach((tr) => {
-        if (tr.getEventType() == ScriptApp.EventType.ON_EVENT_UPDATED) {
-          ScriptApp.deleteTrigger(tr);
-          ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(calendar_id).onEventUpdated().create();
-        }
-      });
-    },
+    // updateCalendarTrigger: function (calendar_id) {
+    //   this.triggers.forEach((tr) => {
+    //     if (tr.getEventType() == ScriptApp.EventType.ON_EVENT_UPDATED) {
+    //       ScriptApp.deleteTrigger(tr);
+    //       ScriptApp.newTrigger('onCalendarUpdated').forUserCalendar(calendar_id).onEventUpdated().create();
+    //     }
+    //   });
+    // },
   };
 })();
 
@@ -1499,6 +1500,7 @@ settings.default = (function () {
       __createMembers();
       if (TYPE == 3) {
         __createAvailable();
+        SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'onCalendarUpdated').addToUi();
       }
       sheets.ss.insertSheet('Cached');
       sheets.update();
