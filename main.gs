@@ -13,7 +13,7 @@ function init() {
 
 function onOpening() {
   try {
-    if (sheets.length > 1) {
+    if (sheets.isConfigured) {
       mail.alertFewMails();
       if (TYPE == 3) {
         SpreadsheetApp.getUi().createMenu('カレンダー').addItem('カレンダーをシートに反映', 'updateFormAndSchedule').addToUi();
@@ -297,6 +297,9 @@ const sheets = (function () {
     get sheets() {
       return __sheets;
     },
+    get isConfigured() {
+      return Array.from(__name_idx.keys()).includes('設定');
+    },
     get ss() {
       return __ss;
     },
@@ -468,7 +471,7 @@ const settings = (function () {
     __settings.config.closeDate.setHours(closeHour, closeMin, 0, 0);
   }
 
-  if (sheets.length > 1) {
+  if (sheets.isConfigured) {
     __retrieve();
   }
 
@@ -721,7 +724,7 @@ const booking = (function () {
   let __event_type;
   let __calendar;
   let __finalizeTriggers;
-  if (sheets.length > 1) {
+  if (sheets.isConfigured) {
     __calendar = CalendarApp.getCalendarById(settings.config.workingCalendar);
     __finalizeTriggers = String(settings.config.finalizeTrigger).match(/\d+/g);
   }
@@ -1166,8 +1169,8 @@ settings.init = function () {
       start = false;
     }
 
-    if (sheets.length > 1 && start) {
-      msg = '一度設定を行ったことがあるようです（シートが2枚以上あります）。\nもう一度初期化を行いますか？\n';
+    if (sheets.isConfigured && start) {
+      msg = '一度設定を行ったことがあるようです。\nもう一度初期化を行いますか？\n';
       msg += 'フォームの回答が一番初めのシートでないとこれまでの情報が失われる場合があります。';
       choice = dlg.alert('設定の初期化を行います', msg, buttons);
       // let choice = Browser.msgBox('設定の初期化を行います', msg, buttons);
@@ -1402,7 +1405,7 @@ settings.default = (function () {
       const close_time = 19;
       const exp_length = 60;
       for (const cur_time = new Date(now); cur_time.getHours() < close_time; cur_time.setMinutes(cur_time.getMinutes() + exp_length)) {
-        new_row.push(Utilities.formatDate(now, default_timezone, 'HH:mm'));
+        new_row.push(Utilities.formatDate(cur_time, default_timezone, 'HH:mm'));
       }
       __default.available.push(new_row);
     }
