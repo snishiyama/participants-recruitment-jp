@@ -47,6 +47,7 @@ function onSheetEdit(e) {
   try {
     const sh = e.range.getSheet();
     const sheetName = sh.getSheetName();
+    sheets.ss.toast('スクリプトを実行しています。終了までお待ちください。');
     // 「フォームの回答」シートが編集された場合
     if (sheetName === sheets.sheets[0].getSheetName()) {
       const srow = e.range.getRow();
@@ -96,6 +97,7 @@ function onSheetEdit(e) {
         onCalendarUpdated();
       }
     }
+    sheets.ss.toast('スクリプトが終了しました。', '', 3);
   } catch (err) {
     //実行に失敗した時に通知
     const msg = `[${err.name}] ${err.stack}`;
@@ -250,15 +252,10 @@ function alertInitWithChangeOf(changed) {
   if (TYPE != 3) {
     return;
   }
-  const choice = dlg.alert(
-    `${changed}が変更されました`,
-    '空き予定を初期化しますか？\n\n処理に時間がかかります。10〜20秒ほどお待ち下さい。 \n処理が完了するとその旨のダイアログボックスが表示されます。',
-    dlg.ui.ButtonSet.OK_CANCEL
-  );
+  const choice = dlg.alert(`${changed}が変更されました`, '空き予定を初期化しますか？', dlg.ui.ButtonSet.OK_CANCEL);
   if (choice == dlg.ui.Button.OK) {
     schedule.init();
     form.modify();
-    dlg.alert('空き予定の初期化', '空き予定の初期化が終了しました。適宜情報を変更してください。', dlg.ui.ButtonSet.OK);
   }
 }
 
