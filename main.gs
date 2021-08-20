@@ -130,10 +130,10 @@ function onClock() {
       tomorrowExps.sort((a, b) => {
         return a.from < b.from ? -1 : 1;
       });
-      const schedule = tomorrowExps.map((exp) => {
+      const time_table = tomorrowExps.map((exp) => {
         return `${fmtDate(exp.from, 'HH:mm')} - ${fmtDate(exp.to, 'HH:mm')} ${exp.name}`;
       });
-      const body = schedule.join('\n');
+      const body = time_table.join('\n');
       const title = `明日（${fmtDate(tomorrow, 'MM/dd')}）の実験予定`;
       MailApp.sendEmail(settings.config.experimenterMailAddress, title, body);
     }
@@ -249,11 +249,16 @@ function alertInitWithChangeOf(changed) {
   if (TYPE != 3) {
     return;
   }
-  const choice = dlg.alert(`${changed}が変更されました`, '空き予定を初期化しますか？', dlg.ui.ButtonSet.OK_CANCEL);
+  const choice = dlg.alert(
+    `${changed}が変更されました`,
+    '空き予定を初期化しますか？\n\n処理に時間がかかります。10〜20秒ほどお待ち下さい。 \n処理が完了するとその旨のダイアログボックスが表示されます。',
+    dlg.ui.ButtonSet.OK_CANCEL
+  );
   if (choice == dlg.ui.Button.OK) {
     schedule.init();
     form.modify();
   }
+  dlg.alert('空き予定の初期化', '空き予定の初期化が終了しました。適宜情報を変更してください。', dlg.ui.ButtonSet.OK);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
