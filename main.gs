@@ -1266,7 +1266,7 @@ settings.default = (function () {
       仮予約: [
         'participantName 様\n',
         '心理学実験実施責任者のexperimenterNameです。',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         '予約の確認メールを自動で送信しております。\n',
         'expDate fromWhen〜toWhen',
         'で予約を受け付けました（まだ確定はしていません)。',
@@ -1278,7 +1278,7 @@ settings.default = (function () {
       時間外: [
         'participantName 様\n',
         '心理学実験実施責任者のexperimenterNameです。',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         '申し訳ありませんが、ご希望いただいた',
         'expDate fromWhen〜toWhen',
         'は実験実施可能時間（openTime時〜closeTime時）外または、実施期間（openDate〜closeDate）外です。',
@@ -1288,7 +1288,7 @@ settings.default = (function () {
       重複: [
         'participantName 様\n',
         '心理学実験実施責任者のexperimenterNameです。',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         '申し訳ありませんが、ご希望いただいた',
         'expDate fromWhen〜toWhen',
         'にはすでに予約（予定）が入っており（タッチの差で他の方が予約をされた可能性もあります）、実験を実施することができません。',
@@ -1297,7 +1297,7 @@ settings.default = (function () {
       ],
       予約完了wd: [
         'participantName 様\n',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
         '場所はexperimentRoomです。当日は直接お越しください。',
         'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
@@ -1307,7 +1307,7 @@ settings.default = (function () {
       ],
       予約完了we: [
         'participantName 様\n',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         'expDate fromWhen〜toWhenの心理学実験の予約が完了しましたのでメールいたします。',
         '場所はexperimentRoomです。休日は教育学部棟玄関の鍵がかかっており、外から入ることができません。実験開始5分前から玄関前で待機しておりますので、実験開始時間までにお越しください。',
         'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
@@ -1318,7 +1318,7 @@ settings.default = (function () {
       222: [
         'participantName 様\n',
         '心理学実験実施責任者のexperimenterNameです。',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         '大変申し訳ありませんが、以前実施した同様の実験にご参加いただいており、今回の実験にはご参加いただけません。ご了承ください。\n',
         'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
         '今後ともよろしくお願いします。\n',
@@ -1327,7 +1327,7 @@ settings.default = (function () {
       333: [
         'participantName 様\n',
         '心理学実験実施責任者のexperimenterNameです。',
-        'この度は心理学実験への応募ありがとうございました。',
+        'この度は心理学実験へのご応募ありがとうございました。',
         '大変申し訳ありませんが、応募いただいた段階ですでに募集人数の定員に達していたため、実験に参加していただくことができません。ご了承ください。\n',
         '今後、次の実験を実施する際に再度応募していただけると幸いです。',
         'ご不明な点などありましたら、experimenterMailAddressまでご連絡ください。',
