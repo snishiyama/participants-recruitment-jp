@@ -1,4 +1,4 @@
-// Copyright (c) 2017, Sho Ishiguro. All rights reserved.
+// Copyright (c) 2017-2019, Sho Ishiguro (c) 2019-2021, Satoru Nishiyama and Sho Ishiguro
 // Use of this source code is governed by the BSD 2-Clause License
 
 const TYPE = 3; // 1: 自由回答, 2 or 3: 選択式 どちらかの半角数字を入れてください。
@@ -658,7 +658,7 @@ const form = (function () {
     for (const exp_dates of schedule.available.values()) {
       for (let idx = 0; idx < exp_dates.length; idx++) {
         const exp_date = exp_dates[idx];
-        if (is(exp_date, 'Date') && new Date() < exp_date) {
+        if (is(exp_date, 'Date') && settings.config.openDate <= exp_date && exp_date < settings.config.closeDate) {
           const stime = fmtDate(new Date(exp_date), 'yyyy/MM/dd HH:mm');
           let etime = new Date(stime);
           etime.setMinutes(etime.getMinutes() + settings.config.experimentLength);
