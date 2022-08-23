@@ -841,6 +841,8 @@ const booking = (function () {
       __from.setDate(day);
     }
 
+    __to = new Date(__from);
+
     // 時間の処理
     const from_to = time.match(/\d+/g); // 数字の部分だけを取り出す
     if (from_to.length == 4) {
